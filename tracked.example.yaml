@@ -1,0 +1,6 @@
+# Repos whose open wayfinder:map issues get materialized into cmux workspaces.
+# `repo` is owner/name (renames are resolved to the canonical name at sync time);
+# `path` is the local checkout the map's workspace opens in (~ is expanded).
+repos:
+  - repo: acme/example
+    path: ~/code/example

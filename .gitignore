@@ -1,0 +1,25 @@
+node_modules/
+
+# personal — local checkout paths, not shared
+tracked.yaml
+
+# Claude Code — ignore local/machine state, keep shareable config
+# (.claude/settings.json, agents/, commands/, skills/, rules/) tracked.
+.claude/settings.local.json
+.claude/worktrees/
+CLAUDE.local.md
+.claude/debug/
+.claude/projects/
+.claude/file-history/
+.claude/shell-snapshots/
+.claude/todos/
+.claude/tasks/
+.claude/statsig/
+.claude/history.jsonl
+.claude/**/*.cache
+
+# secrets — never commit
+.env
+
+# local sandcastle orchestration (dev tooling, not shipped)
+.sandcastle/
