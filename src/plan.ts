@@ -27,24 +27,74 @@ export function groupName(repo: string): string {
   return `${repoShort(repo)} wayfinder`;
 }
 
+/** Max length of a derived workspace label before we clamp it with an ellipsis. */
+const LABEL_MAX = 40;
+/** Prefix marking a completed map's workspace (✓ + space — readable before words). */
+const WS_DONE_PREFIX = "✓ ";
+
 /**
- * Workspace title — human-facing, may collide across owners (see description).
- * `done` prefixes a ✓ (same marker the ticket tabs use) once the map itself is
- * complete — see {@link isMapComplete}.
+ * Derive a short, human-scannable label from a map issue's GitHub title — the
+ * name shown in the cmux sidebar instead of a bare `repo/map#` slug.
+ *
+ * Wayfinder map titles follow `Wayfinder map: <name> — <tagline>` (the tagline,
+ * and its em/en-dash/colon separator, is optional). We strip the boilerplate
+ * `Wayfinder map:` prefix and keep only the headline before the first tagline
+ * separator, so `Wayfinder map: app notifications — badge counts on the shell`
+ * becomes `app notifications`. A title with no tagline (e.g. `Wayfinder map:
+ * nutrition.exe food + weight tracker`) keeps its whole headline. A degenerate
+ * (boilerplate-only) title falls back to `map #<n>`; an over-long one is clamped
+ * so the sidebar stays legible.
  */
-export function workspaceTitle(repo: string, mapNumber: number, done = false): string {
+export function mapLabel(mapTitle: string, mapNumber: number): string {
+  let s = (mapTitle ?? "").trim();
+  s = s.replace(/^wayfinder\s+map\s*:\s*/i, ""); // drop the "Wayfinder map:" boilerplate
+  const sep = /\s+(?:—|–|-|:)\s+/.exec(s); // first space-delimited tagline separator
+  if (sep) s = s.slice(0, sep.index);
+  s = s.trim();
+  if (!s) return `map #${mapNumber}`; // title was only boilerplate → stable fallback
+  if (s.length > LABEL_MAX) s = `${s.slice(0, LABEL_MAX - 1).trimEnd()}…`;
+  return s;
+}
+
+/**
+ * Workspace title — the short, human-facing name shown in the cmux sidebar,
+ * derived from the map's GitHub title via {@link mapLabel}. Identity lives in
+ * the description, so two maps deriving the same label is harmless. `done`
+ * prefixes a ✓ once the map itself is complete — see {@link isMapComplete}.
+ */
+export function workspaceTitle(mapTitle: string, mapNumber: number, done = false): string {
+  return `${done ? WS_DONE_PREFIX : ""}${mapLabel(mapTitle, mapNumber)}`;
+}
+
+/**
+ * The title format sync used before workspace titles became map-name-derived:
+ * `repoShort/map` (+ a ✓ prefix when done). Still recognized as ours so a live
+ * run upgrades those older workspaces to the new label in place.
+ */
+function legacyWorkspaceTitle(repo: string, mapNumber: number, done: boolean): string {
   return `${done ? "✓" : ""}${repoShort(repo)}/${mapNumber}`;
 }
 
 /**
- * Whether `title` is a workspace title sync minted for this map (either the
- * plain `repoShort/map` or its ✓-done variant) — so we only ever re-mark a
- * title we still own, never a hand-renamed workspace.
+ * Whether `title` is a workspace title sync minted for this map — its current
+ * map-derived label, that label's ✓-done variant, or either variant of the
+ * {@link legacyWorkspaceTitle} format. Only such a title is ever re-marked or
+ * upgraded; a hand-renamed workspace matches none of these and is left alone.
+ * (A map whose GitHub title was edited after its workspace was created no longer
+ * matches either variant, so that workspace keeps its prior name rather than
+ * being clobbered — renaming the map issue never retitles a live workspace.)
  */
-export function isManagedWorkspaceTitle(title: string, repo: string, mapNumber: number): boolean {
+export function isManagedWorkspaceTitle(
+  title: string,
+  repo: string,
+  mapNumber: number,
+  mapTitle: string,
+): boolean {
   return (
-    title === workspaceTitle(repo, mapNumber, false) ||
-    title === workspaceTitle(repo, mapNumber, true)
+    title === workspaceTitle(mapTitle, mapNumber, false) ||
+    title === workspaceTitle(mapTitle, mapNumber, true) ||
+    title === legacyWorkspaceTitle(repo, mapNumber, false) ||
+    title === legacyWorkspaceTitle(repo, mapNumber, true)
   );
 }
 

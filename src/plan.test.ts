@@ -5,6 +5,7 @@ import {
   isManagedWorkspaceTitle,
   isMapComplete,
   launchCommand,
+  mapLabel,
   mapTabTitle,
   parseManagedTabTitle,
   parseWorkspaceDescription,
@@ -46,8 +47,6 @@ describe("formatters", () => {
   test("identity keys", () => {
     expect(repoShort("acme/example")).toBe("example");
     expect(groupName("acme/example")).toBe("example wayfinder");
-    expect(workspaceTitle("acme/example", 101)).toBe("example/101");
-    expect(workspaceTitle("acme/example", 101, true)).toBe("✓example/101");
     expect(workspaceDescription("acme/example", 101)).toBe("acme/example#101");
     expect(worktreeName(101, 103)).toBe("wayfinder/101/103");
   });
@@ -58,11 +57,17 @@ describe("formatters", () => {
     expect(isMapComplete(mapOf(101, []))).toBe(false); // no sub-issues yet ≠ done
   });
 
-  test("isManagedWorkspaceTitle: matches both variants, not hand-renames", () => {
-    expect(isManagedWorkspaceTitle("example/101", "acme/example", 101)).toBe(true);
-    expect(isManagedWorkspaceTitle("✓example/101", "acme/example", 101)).toBe(true);
-    expect(isManagedWorkspaceTitle("my scratch ws", "acme/example", 101)).toBe(false);
-    expect(isManagedWorkspaceTitle("example/102", "acme/example", 101)).toBe(false);
+  test("isManagedWorkspaceTitle: matches the derived label, ✓ variant, and legacy format", () => {
+    const t = "Wayfinder map: app notifications — badge counts on the shell";
+    // current map-derived label + its ✓ variant
+    expect(isManagedWorkspaceTitle("app notifications", "acme/homebase", 212, t)).toBe(true);
+    expect(isManagedWorkspaceTitle("✓ app notifications", "acme/homebase", 212, t)).toBe(true);
+    // legacy repoShort/map format (+ ✓) — recognized so a live run upgrades it
+    expect(isManagedWorkspaceTitle("homebase/212", "acme/homebase", 212, t)).toBe(true);
+    expect(isManagedWorkspaceTitle("✓homebase/212", "acme/homebase", 212, t)).toBe(true);
+    // hand-renamed / mismatched → left alone
+    expect(isManagedWorkspaceTitle("notifs WIP", "acme/homebase", 212, t)).toBe(false);
+    expect(isManagedWorkspaceTitle("homebase/213", "acme/homebase", 212, t)).toBe(false);
   });
 
   test("launch command carries the worktree but NOT the prompt (no auto-submit)", () => {
@@ -79,6 +84,52 @@ describe("formatters", () => {
   test("map tab title is a marker the numbered matcher ignores", () => {
     expect(mapTabTitle(101)).toBe("map #101");
     expect(parseManagedTabTitle(mapTabTitle(101))).toBeNull(); // not a managed ticket tab
+  });
+});
+
+describe("mapLabel / workspaceTitle", () => {
+  test("strips the 'Wayfinder map:' prefix and keeps the headline before the tagline", () => {
+    expect(mapLabel("Wayfinder map: app notifications — badge counts on the shell", 212)).toBe(
+      "app notifications",
+    );
+    expect(mapLabel("Wayfinder map: workout.exe — plan-driven lifting tracker", 195)).toBe(
+      "workout.exe",
+    );
+  });
+
+  test("keeps the whole headline when there is no tagline separator", () => {
+    expect(mapLabel("Wayfinder map: nutrition.exe food + weight tracker", 168)).toBe(
+      "nutrition.exe food + weight tracker",
+    );
+  });
+
+  test("splits only on a space-delimited separator, not a mid-word hyphen", () => {
+    // "plan-driven" must not split; the " — " before it is the real separator.
+    expect(mapLabel("Wayfinder map: workout.exe — plan-driven lifting tracker", 1)).toBe(
+      "workout.exe",
+    );
+  });
+
+  test("handles titles without the boilerplate prefix", () => {
+    expect(mapLabel("app notifications — later", 1)).toBe("app notifications");
+    expect(mapLabel("just a plain title", 1)).toBe("just a plain title");
+  });
+
+  test("clamps an over-long headline with an ellipsis", () => {
+    const label = mapLabel(`Wayfinder map: ${"x".repeat(80)}`, 1);
+    expect(label.length).toBeLessThanOrEqual(40);
+    expect(label.endsWith("…")).toBe(true);
+  });
+
+  test("falls back to 'map #<n>' for a boilerplate-only or empty title", () => {
+    expect(mapLabel("Wayfinder map:", 7)).toBe("map #7");
+    expect(mapLabel("   ", 7)).toBe("map #7");
+  });
+
+  test("workspaceTitle prefixes ✓ once the map is done", () => {
+    const t = "Wayfinder map: app notifications — badge counts on the shell";
+    expect(workspaceTitle(t, 212)).toBe("app notifications");
+    expect(workspaceTitle(t, 212, true)).toBe("✓ app notifications");
   });
 });
 

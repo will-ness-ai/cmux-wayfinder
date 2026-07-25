@@ -21,7 +21,11 @@ This is a niche tool: it's only useful if you already run `cmux` and drive your 
 Reads `tracked.yaml` (list of tracked repos + local checkout paths), discovers open `wayfinder:map` issues per repo via `gh`, and idempotently syncs cmux state over the v2 socket (`cmux rpc`):
 
 - one workspace **group** per repo (`<repo> wayfinder`)
-- one **workspace** per open map (title `<repo>/<map#>`, cwd = local checkout)
+- one **workspace** per open map — titled with the map's **short name** (derived
+  from its GitHub issue title, e.g. `Wayfinder map: app notifications — badge
+  counts on the shell` → **`app notifications`**), cwd = local checkout. The
+  full `owner/repo#map` stays as the workspace description (the identity key), so
+  the sidebar reads by name while sync still matches on the stable id
 - one **browser tab** per workspace (title `map #<map#>`), open to the map
   issue — *enforced*: recreated (pinned leftmost) if you close it
 - one **tab** per open+unblocked sub-issue (title `<ticket#>`): launches

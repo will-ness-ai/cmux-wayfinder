@@ -110,7 +110,7 @@ async function syncMap(ctx: {
 }) {
   const { canonical, cwd, map, group, opts, log } = ctx;
   const done = isMapComplete(map);
-  const title = workspaceTitle(canonical, map.number, done);
+  const title = workspaceTitle(map.title, map.number, done);
   const description = workspaceDescription(canonical, map.number);
 
   let ws = await cmux.findWorkspaceByDescription(description);
@@ -120,7 +120,7 @@ async function syncMap(ctx: {
       if (!group) throw new Error("group not created (bug)");
       ws = await cmux.createWorkspace({ name: title, description, cwd, group: group.ref });
     }
-  } else if (ws.title !== title && isManagedWorkspaceTitle(ws.title, canonical, map.number)) {
+  } else if (ws.title !== title && isManagedWorkspaceTitle(ws.title, canonical, map.number, map.title)) {
     // Flip the ✓ as the map completes/reopens, but only touch a title we still
     // own — a hand-renamed workspace is left alone.
     log.act(`rename workspace "${ws.title}" → "${title}"`);
