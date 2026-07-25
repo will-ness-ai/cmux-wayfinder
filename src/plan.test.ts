@@ -70,12 +70,12 @@ describe("formatters", () => {
     expect(isManagedWorkspaceTitle("homebase/213", "acme/homebase", 212, t)).toBe(false);
   });
 
-  test("launch command carries the worktree but NOT the prompt (no auto-submit)", () => {
+  test("launch command carries the worktree but NOT the prompt", () => {
     expect(launchCommand(101, 103)).toBe("claude --worktree wayfinder/101/103");
-    expect(launchCommand(101, 103)).not.toContain("wayfinder map"); // prompt is typed separately
+    expect(launchCommand(101, 103)).not.toContain("wayfinder map"); // typed into the TUI instead
   });
 
-  test("ticket prompt is the slash command typed unsubmitted", () => {
+  test("ticket prompt is the slash command typed into the TUI and submitted", () => {
     expect(ticketPrompt(101, 103)).toBe(
       "/wayfinder map #101 work on ticket #103. If you end up creating files (prototype, research, etc..) ensure that you create and merge a PR containing those artifacts",
     );

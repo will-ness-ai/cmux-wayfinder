@@ -31,7 +31,7 @@ Reads `tracked.yaml` (list of tracked repos + local checkout paths), discovers o
 - one **tab** per open+unblocked sub-issue (title `<ticket#>`): launches
   `claude --worktree wayfinder/<map#>/<ticket#>`, waits for the TUI, then types
   `/wayfinder map #<map#> work on ticket #<ticket#>` into the input box and
-  **leaves it unsubmitted** — you review each and press Enter yourself
+  **submits it** — each new tab lands already working its ticket
 
 Sync is additive + rename-only by default (closed tickets → `✓<n>` tabs); nothing is closed without `--prune`.
 
@@ -49,9 +49,10 @@ bun src/sync.ts --config path/to/tracked.yaml
 `--dry-run` is the safe way to preview: it does the real GitHub reads and prints
 every group/workspace/tab it *would* create, without contacting cmux.
 
-A live run never auto-starts an agent: each new tab launches `claude` on its
-worktree and pre-types the `/wayfinder …` prompt, leaving it **unsubmitted** so
-you review each tab and press Enter yourself.
+A live run **does start agents**: each new tab launches `claude` on its worktree,
+waits for the TUI, types the `/wayfinder …` prompt and submits it. Only *new*
+tabs — an existing ticket tab is never re-prompted — so a run is safe to repeat,
+but `--dry-run` first if you want to see how many agents it will kick off.
 
 Workspace creation uses the v1 `cmux new-workspace` CLI (the only path that
 honors title/cwd/description/group at creation); everything else goes over the

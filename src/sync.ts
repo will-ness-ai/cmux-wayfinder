@@ -143,19 +143,20 @@ async function syncMap(ctx: {
   log.info(`  workspace "${title}": frontier ${fmtFrontier(map)}`);
 
   for (const c of plan.creates) {
-    log.act(`create tab "${c.title}": ${c.launch} → prefill (unsubmitted): ${c.prompt}`);
+    log.act(`create tab "${c.title}": ${c.launch} → submit: ${c.prompt}`);
     if (!opts.dryRun && ws) {
       const sid = await cmux.createSurface(ws.id);
       await cmux.renameTab(sid, c.title);
       await cmux.settle(async () =>
         (await cmux.listSurfaces(ws!.id)).find((s) => s.id === sid && s.title === c.title),
       );
-      // Launch claude, wait for its TUI, then type the prompt WITHOUT Enter so
-      // the human reviews and submits it.
+      // Launch claude, wait for its TUI, then type the prompt and submit it —
+      // a new tab arrives already working its ticket.
       await cmux.sendCommand(sid, c.launch);
       const ready = await cmux.waitForClaudeReady(sid);
       if (!ready) log.info(`    ⚠ tab "${c.title}": claude TUI not detected; typed prompt anyway`);
-      await cmux.sendText(sid, c.prompt);
+      const landed = await cmux.sendPrompt(sid, c.prompt);
+      if (!landed) log.info(`    ⚠ tab "${c.title}": prompt not seen on screen; submitted anyway`);
     }
   }
 

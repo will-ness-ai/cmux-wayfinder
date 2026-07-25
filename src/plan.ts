@@ -147,16 +147,16 @@ export function worktreeName(mapNumber: number, ticket: number): string {
 
 /**
  * Shell command that launches claude on the ticket's worktree. The prompt is
- * deliberately NOT passed as an argument (that would auto-submit it); instead
- * it is typed into the ready TUI afterwards, unsubmitted — see {@link ticketPrompt}.
+ * not passed as an argument — it is typed into the ready TUI afterwards and
+ * submitted there, so it runs as a slash command — see {@link ticketPrompt}.
  */
 export function launchCommand(mapNumber: number, ticket: number): string {
   return `claude --worktree ${worktreeName(mapNumber, ticket)}`;
 }
 
 /**
- * The slash-command prompt typed into claude's input box (once the TUI is
- * ready) and left UNSUBMITTED for the human to review and send.
+ * The slash-command prompt typed into claude's input box once the TUI is ready,
+ * then submitted — a freshly opened ticket tab is already working.
  */
 export function ticketPrompt(mapNumber: number, ticket: number): string {
   return `/wayfinder map #${mapNumber} work on ticket #${ticket}. If you end up creating files (prototype, research, etc..) ensure that you create and merge a PR containing those artifacts`;
@@ -187,7 +187,7 @@ export interface TabCreate {
   title: string; // always the bare number
   /** Shell command run in the new tab to launch claude on the worktree. */
   launch: string;
-  /** Prompt typed into the ready TUI afterwards, left unsubmitted. */
+  /** Prompt typed into the ready TUI afterwards, then submitted. */
   prompt: string;
 }
 

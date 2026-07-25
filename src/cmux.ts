@@ -201,6 +201,38 @@ export async function sendText(surface_id: string, text: string): Promise<void> 
   await rpc("surface.send_text", { surface_id, text });
 }
 
+/**
+ * Type `text` into a ready claude TUI and submit it.
+ *
+ * The Enter goes as a separate keystroke *after* the text has visibly landed in
+ * the input box: the TUI batches incoming paste, and an Enter that races that
+ * batching gets absorbed into the paste (leaving the prompt typed but unsent).
+ * So we poll the screen for a distinctive head slice of the text, then press
+ * Enter — and press it anyway once `timeoutMs` elapses, so an unreadable screen
+ * still submits best-effort. Returns whether the text was confirmed on screen.
+ */
+export async function sendPrompt(
+  surface_id: string,
+  text: string,
+  timeoutMs = 5000,
+): Promise<boolean> {
+  await rpc("surface.send_text", { surface_id, text });
+  // Short head slice: enough to be distinctive, short enough to survive the
+  // input box wrapping the rest of the prompt onto later lines.
+  const needle = text.trim().slice(0, 24);
+  const t0 = Date.now();
+  let landed = false;
+  while (Date.now() - t0 < timeoutMs) {
+    if ((await readScreen(surface_id)).includes(needle)) {
+      landed = true;
+      break;
+    }
+    await sleep(100);
+  }
+  await rpc("surface.send_key", { surface_id, key: "enter" });
+  return landed;
+}
+
 // ---------- closers (--prune only) ----------
 
 /** Close a single tab. Reached only from the `--prune` path. */
