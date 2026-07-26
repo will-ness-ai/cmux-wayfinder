@@ -162,16 +162,91 @@ export function ticketPrompt(mapNumber: number, ticket: number): string {
   return `/wayfinder map #${mapNumber} work on ticket #${ticket}. If you end up creating files (prototype, research, etc..) ensure that you create and merge a PR containing those artifacts`;
 }
 
+// ---------- ticket tab titles: [<type><readiness>]<n> ----------
+
+export type TicketType = "grilling" | "task" | "research" | "prototype";
+
+/** X slot — one emoji per `wayfinder:<type>` ticket-type label. */
+const TYPE_EMOJI: Record<TicketType, string> = {
+  grilling: "🗣️",
+  task: "🔨",
+  research: "🔎",
+  prototype: "🧪",
+};
+
+/** Y slot — whose turn the tab is waiting on; ✓ takes the slot once closed. */
+export const READY_FOR_HUMAN = "🫵";
+export const READY_FOR_AGENT = "🤖";
+const DONE = "✓";
+/** What may occupy the Y slot of a managed tab title. */
+type YSlot = typeof READY_FOR_HUMAN | typeof READY_FOR_AGENT | typeof DONE;
+
+const TYPE_LABEL_RE = new RegExp(`^wayfinder:(${Object.keys(TYPE_EMOJI).join("|")})$`);
+
+/** The ticket's `wayfinder:<type>` label; an unlabeled ticket is a task. */
+export function ticketTypeOf(labels: string[]): TicketType {
+  for (const l of labels) {
+    const m = TYPE_LABEL_RE.exec(l);
+    if (m) return m[1] as TicketType;
+  }
+  return "task";
+}
+
+/**
+ * Y slot from the ticket's readiness labels — the source of truth, so whoever
+ * flips the label on the issue (agent handing off, human handing back) flips
+ * the tab on the next sync. `ready-for-human` wins if both are present; a
+ * ticket carrying neither defaults HITL (🫵).
+ */
+export function readinessOf(labels: string[]): typeof READY_FOR_HUMAN | typeof READY_FOR_AGENT {
+  if (labels.includes("ready-for-human")) return READY_FOR_HUMAN;
+  if (labels.includes("ready-for-agent")) return READY_FOR_AGENT;
+  return READY_FOR_HUMAN;
+}
+
+/**
+ * Managed ticket tab title: `[XY]<n>` — X the ticket-type emoji, Y the
+ * readiness emoji (🫵 human / 🤖 agent), replaced by ✓ once the ticket closes.
+ */
+export function ticketTabTitle(ticket: number, labels: string[], readiness: YSlot): string {
+  return `[${TYPE_EMOJI[ticketTypeOf(labels)]}${readiness}]${ticket}`;
+}
+
+/** The title a managed tab should carry for `sub`'s current state and labels. */
+function desiredTabTitle(sub: SubIssue): string {
+  return ticketTabTitle(
+    sub.number,
+    sub.labels,
+    sub.state === "closed" ? DONE : readinessOf(sub.labels),
+  );
+}
+
 // ---------- managed-tab matcher ----------
 
 /**
- * A tab is *managed* only if its title is exactly a ticket number (`42`) or a
- * done-marked ticket number (`✓42`). Everything else — the default shell tab,
- * auto-retitled tabs, hand-renamed tabs — is left untouched. Returns the ticket
- * number, or null if the title isn't managed.
+ * Strip emoji variation selectors (U+FE0F, e.g. the one riding 🗣️) so titles
+ * parse and compare the same whether or not a layer between us and the screen
+ * (cmux, hand-typing) preserves them.
+ */
+function canon(s: string): string {
+  return s.replace(/\uFE0F/g, "");
+}
+
+const X_ALT = canon(Object.values(TYPE_EMOJI).join("|"));
+const Y_ALT = [READY_FOR_HUMAN, READY_FOR_AGENT, DONE].join("|");
+/** `[XY]<n>` with X and Y drawn from the known emoji sets only. */
+const MANAGED_RE = new RegExp(`^\\[(?:${X_ALT})(?:${Y_ALT})\\](\\d+)$`, "u");
+
+/**
+ * A tab is *managed* only if its title is `[XY]<n>` with both emoji from the
+ * known sets, or a legacy bare/✓-marked ticket number (`42` / `✓42` — still
+ * recognized so a live run upgrades them in place). Everything else — the
+ * default shell tab, auto-retitled tabs, hand-renamed tabs — is left untouched.
+ * Returns the ticket number, or null if the title isn't managed.
  */
 export function parseManagedTabTitle(title: string): number | null {
-  const m = /^✓?(\d+)$/.exec(title.trim());
+  const t = canon(title.trim());
+  const m = MANAGED_RE.exec(t) ?? /^✓?(\d+)$/.exec(t);
   return m ? Number(m[1]) : null;
 }
 
@@ -184,7 +259,7 @@ export interface Tab {
 
 export interface TabCreate {
   ticket: number;
-  title: string; // always the bare number
+  title: string; // `[XY]<n>` — see ticketTabTitle
   /** Shell command run in the new tab to launch claude on the worktree. */
   launch: string;
   /** Prompt typed into the ready TUI afterwards, then submitted. */
@@ -206,7 +281,10 @@ export interface TabClose {
 export interface TabPlan {
   /** New tabs for frontier tickets with no tab yet, ascending by ticket. */
   creates: TabCreate[];
-  /** ✓-flips: open→✓ when a ticket closed, ✓→open when it reopened. */
+  /**
+   * Title drift fixes: ✓-flips as tickets close/reopen, type-emoji updates
+   * when a label changes, and legacy `<n>`/`✓<n>` → `[XY]<n>` upgrades.
+   */
   renames: TabRename[];
   /**
    * Managed tabs to close (only ever populated under `--prune`): tabs whose
@@ -231,10 +309,14 @@ export interface TabPlanOptions {
 /**
  * Decide the tab operations for one map's workspace.
  *
- * - Frontier tickets (open + unblocked) with no managed tab → create `<n>` and
- *   send the boot command (only ever at creation).
- * - A managed tab whose ticket is now closed → rename `<n>` → `✓<n>`.
- * - A managed tab marked `✓<n>` whose ticket is open again → flip back to `<n>`.
+ * - Frontier tickets (open + unblocked) with no managed tab → create `[XY]<n>`
+ *   (Y from {@link readinessOf}) and send the boot command (only ever at
+ *   creation).
+ * - A managed tab whose title drifted from the desired `[XY]<n>` → rename.
+ *   The whole title is derived from the ticket's live labels/state (labels are
+ *   the source of truth — flip readiness by relabelling the issue): ✓ into/out
+ *   of the Y slot as the ticket closes/reopens, X/Y as labels change, legacy
+ *   `<n>`/`✓<n>` titles upgrade in place.
  * - Additive default never closes a tab; under `prune`, done/stale tabs close
  *   (see {@link TabPlanOptions.prune}) instead of being ✓-renamed.
  */
@@ -245,7 +327,6 @@ export function planTabs(
 ): TabPlan {
   const prune = opts.prune ?? false;
   const byNumber = new Map<number, SubIssue>(map.subIssues.map((s) => [s.number, s]));
-  const frontier = new Set(map.frontier.map((s) => s.number));
 
   // Existing managed tabs, keyed by ticket (first wins on the odd duplicate).
   const managed = new Map<number, Tab>();
@@ -255,13 +336,13 @@ export function planTabs(
   }
 
   const creates: TabCreate[] = [];
-  for (const ticket of [...frontier].sort((a, b) => a - b)) {
-    if (!managed.has(ticket)) {
+  for (const sub of [...map.frontier].sort((a, b) => a.number - b.number)) {
+    if (!managed.has(sub.number)) {
       creates.push({
-        ticket,
-        title: String(ticket),
-        launch: launchCommand(map.number, ticket),
-        prompt: ticketPrompt(map.number, ticket),
+        ticket: sub.number,
+        title: desiredTabTitle(sub),
+        launch: launchCommand(map.number, sub.number),
+        prompt: ticketPrompt(map.number, sub.number),
       });
     }
   }
@@ -271,7 +352,6 @@ export function planTabs(
   const closedTickets = new Set<number>();
   for (const [ticket, tab] of managed) {
     const sub = byNumber.get(ticket);
-    const isDone = tab.title.startsWith("✓");
     const ticketOpen = sub?.state === "open";
     // Prune: a tab whose ticket is no longer open (closed → ✓, or gone → stale)
     // is closed rather than ✓-marked. Open tickets keep their tab regardless.
@@ -280,11 +360,14 @@ export function planTabs(
       closedTickets.add(ticket);
       continue;
     }
-    const shouldBeDone = sub?.state === "closed";
-    if (shouldBeDone && !isDone) {
-      renames.push({ id: tab.id, from: tab.title, to: `✓${ticket}` });
-    } else if (!shouldBeDone && isDone && ticketOpen) {
-      renames.push({ id: tab.id, from: tab.title, to: String(ticket) });
+    // A stale tab (ticket vanished from the map) has no labels/state to derive
+    // a title from — leave it alone on the additive path.
+    if (!sub) continue;
+    const desired = desiredTabTitle(sub);
+    // Compare variation-selector-insensitively: if a layer strips U+FE0F from
+    // a live title, the tab is still "already right" — no rename churn.
+    if (canon(desired) !== canon(tab.title)) {
+      renames.push({ id: tab.id, from: tab.title, to: desired });
     }
   }
 

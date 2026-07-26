@@ -11,8 +11,13 @@ import {
   parseWorkspaceDescription,
   planTabs,
   planWorkspacePrune,
+  READY_FOR_AGENT,
+  READY_FOR_HUMAN,
+  readinessOf,
   repoShort,
   ticketPrompt,
+  ticketTabTitle,
+  ticketTypeOf,
   workspaceDescription,
   workspaceTitle,
   worktreeName,
@@ -21,7 +26,12 @@ import {
   type WorkspaceRef,
 } from "./plan.ts";
 
-function sub(number: number, state: "open" | "closed", blockedBy = 0): SubIssue {
+function sub(
+  number: number,
+  state: "open" | "closed",
+  blockedBy = 0,
+  labels: string[] = [],
+): SubIssue {
   return {
     number,
     title: `Ticket ${number}`,
@@ -29,6 +39,7 @@ function sub(number: number, state: "open" | "closed", blockedBy = 0): SubIssue 
     blockedBy,
     unblocked: state === "open" && blockedBy === 0,
     assignees: [],
+    labels,
     url: `https://x/${number}`,
   };
 }
@@ -133,14 +144,61 @@ describe("mapLabel / workspaceTitle", () => {
   });
 });
 
+describe("ticket tab titles [XY]<n>", () => {
+  test("type emoji from the wayfinder:<type> label; unlabeled is a task", () => {
+    expect(ticketTabTitle(42, ["wayfinder:grilling"], READY_FOR_HUMAN)).toBe("[🗣️🫵]42");
+    expect(ticketTabTitle(42, ["wayfinder:task"], READY_FOR_AGENT)).toBe("[🔨🤖]42");
+    expect(ticketTabTitle(42, ["wayfinder:research"], READY_FOR_AGENT)).toBe("[🔎🤖]42");
+    expect(ticketTabTitle(42, ["wayfinder:prototype"], READY_FOR_AGENT)).toBe("[🧪🤖]42");
+    expect(ticketTabTitle(42, ["bug"], READY_FOR_AGENT)).toBe("[🔨🤖]42");
+  });
+
+  test("ticketTypeOf reads only wayfinder:<type> labels, defaulting to task", () => {
+    expect(ticketTypeOf(["bug", "wayfinder:research"])).toBe("research");
+    expect(ticketTypeOf(["wayfinder:map"])).toBe("task");
+    expect(ticketTypeOf([])).toBe("task");
+  });
+
+  test("readiness labels are the source of truth; HITL default; human wins", () => {
+    expect(readinessOf(["ready-for-human"])).toBe(READY_FOR_HUMAN);
+    expect(readinessOf(["ready-for-agent"])).toBe(READY_FOR_AGENT);
+    expect(readinessOf(["ready-for-human", "ready-for-agent"])).toBe(READY_FOR_HUMAN);
+    expect(readinessOf(["wayfinder:research"])).toBe(READY_FOR_HUMAN); // no label → HITL
+    expect(readinessOf([])).toBe(READY_FOR_HUMAN);
+  });
+});
+
 describe("parseManagedTabTitle", () => {
-  test("matches bare and done-marked numbers", () => {
+  test("matches [XY]<n> titles", () => {
+    expect(parseManagedTabTitle("[🗣️🫵]42")).toBe(42);
+    expect(parseManagedTabTitle("[🔎🤖]7")).toBe(7);
+    expect(parseManagedTabTitle("[🧪✓]7")).toBe(7);
+    expect(parseManagedTabTitle("[🔨🤖]103")).toBe(103);
+  });
+  test("matches legacy bare and done-marked numbers (upgrade path)", () => {
     expect(parseManagedTabTitle("42")).toBe(42);
     expect(parseManagedTabTitle("✓42")).toBe(42);
     expect(parseManagedTabTitle("  7 ")).toBe(7);
   });
+  test("tolerates a stripped variation selector (🗣️ vs 🗣)", () => {
+    expect(parseManagedTabTitle("[\u{1F5E3}🫵]42")).toBe(42); // 🗣 without U+FE0F
+  });
   test("rejects non-managed titles", () => {
-    for (const t of ["", "shell", "Claude Code", "⠂ Claude", "v101", "42a", "✓", "1.2", "✓✓4"]) {
+    for (const t of [
+      "",
+      "shell",
+      "Claude Code",
+      "⠂ Claude",
+      "v101",
+      "42a",
+      "✓",
+      "1.2",
+      "✓✓4",
+      "[🍕🤖]42", // unknown type emoji → hand-made, not ours
+      "[🗣️]42", // missing readiness slot
+      "[🗣️🫵]", // no ticket number
+      "[🗣️🫵] 42", // space between bracket and number
+    ]) {
       expect(parseManagedTabTitle(t)).toBeNull();
     }
   });
@@ -150,41 +208,87 @@ describe("planTabs", () => {
   const shell: Tab = { id: "s0", title: "zsh" };
 
   test("creates tabs for frontier tickets missing a tab, ascending, with boot cmd", () => {
-    const map = mapOf(101, [sub(103, "open"), sub(107, "open"), sub(105, "open", 1)]);
+    const map = mapOf(101, [
+      sub(103, "open", 0, ["wayfinder:research", "ready-for-agent"]),
+      sub(107, "open", 0, ["wayfinder:grilling"]),
+      sub(105, "open", 1),
+    ]);
     const plan = planTabs([shell], map);
     expect(plan.creates.map((c) => c.ticket)).toEqual([103, 107]); // 105 is blocked → not frontier
-    expect(plan.creates[0].title).toBe("103");
+    expect(plan.creates[0].title).toBe("[🔎🤖]103"); // labelled ready-for-agent
+    expect(plan.creates[1].title).toBe("[🗣️🫵]107"); // no readiness label → HITL
     expect(plan.creates[0].launch).toBe(launchCommand(101, 103));
     expect(plan.creates[0].prompt).toBe(ticketPrompt(101, 103));
     expect(plan.renames).toEqual([]);
     expect(plan.desiredOrder).toEqual([103, 107]);
   });
 
-  test("does not recreate an existing tab (idempotent)", () => {
-    const map = mapOf(101, [sub(103, "open"), sub(107, "open")]);
-    const plan = planTabs([shell, { id: "t1", title: "103" }, { id: "t2", title: "107" }], map);
+  test("does not recreate or rename an up-to-date tab (idempotent)", () => {
+    const map = mapOf(101, [sub(103, "open"), sub(107, "open", 0, ["wayfinder:grilling"])]);
+    const plan = planTabs(
+      [shell, { id: "t1", title: "[🔨🫵]103" }, { id: "t2", title: "[🗣️🫵]107" }],
+      map,
+    );
     expect(plan.creates).toEqual([]);
     expect(plan.renames).toEqual([]);
   });
 
-  test("marks a closed ticket's tab done (open → ✓), never closes it", () => {
-    const map = mapOf(101, [sub(103, "closed"), sub(107, "open")]);
-    const plan = planTabs([shell, { id: "t1", title: "103" }, { id: "t2", title: "107" }], map);
-    expect(plan.creates).toEqual([]);
-    expect(plan.renames).toEqual([{ id: "t1", from: "103", to: "✓103" }]);
+  test("upgrades a legacy bare-number tab to [XY]<n> in place", () => {
+    const map = mapOf(101, [sub(103, "open", 0, ["wayfinder:prototype", "ready-for-agent"])]);
+    const plan = planTabs([shell, { id: "t1", title: "103" }], map);
+    expect(plan.creates).toEqual([]); // upgraded, not recreated
+    expect(plan.renames).toEqual([{ id: "t1", from: "103", to: "[🧪🤖]103" }]);
   });
 
-  test("flips a reopened ticket's tab back (✓ → open)", () => {
-    const map = mapOf(101, [sub(103, "open"), sub(107, "open")]);
-    const plan = planTabs([shell, { id: "t1", title: "✓103" }, { id: "t2", title: "107" }], map);
-    // reopened + unblocked: flip back to 103, and don't re-create (tab exists)
-    expect(plan.renames).toEqual([{ id: "t1", from: "✓103", to: "103" }]);
+  test("marks a closed ticket's tab done (Y slot → ✓), never closes it", () => {
+    const map = mapOf(101, [
+      sub(103, "closed", 0, ["wayfinder:research", "ready-for-agent"]),
+      sub(107, "open"),
+    ]);
+    const plan = planTabs(
+      [shell, { id: "t1", title: "[🔎🤖]103" }, { id: "t2", title: "[🔨🫵]107" }],
+      map,
+    );
+    expect(plan.creates).toEqual([]);
+    expect(plan.renames).toEqual([{ id: "t1", from: "[🔎🤖]103", to: "[🔎✓]103" }]);
+  });
+
+  test("flips a reopened ticket's tab back (✓ → label-derived readiness)", () => {
+    const map = mapOf(101, [sub(103, "open", 0, ["wayfinder:grilling"]), sub(107, "open")]);
+    const plan = planTabs(
+      [shell, { id: "t1", title: "[🗣️✓]103" }, { id: "t2", title: "[🔨🫵]107" }],
+      map,
+    );
+    // reopened + unblocked: flip back to 🫵 (no readiness label), don't re-create
+    expect(plan.renames).toEqual([{ id: "t1", from: "[🗣️✓]103", to: "[🗣️🫵]103" }]);
     expect(plan.creates).toEqual([]);
   });
 
-  test("leaves a ✓ tab alone while its ticket stays closed", () => {
+  test("does not rename-churn when a layer stripped the variation selector", () => {
+    // live title is 🗣 (no U+FE0F); desired is 🗣️ — same tab, no rename
+    const map = mapOf(101, [sub(103, "open", 0, ["wayfinder:grilling"])]);
+    const plan = planTabs([shell, { id: "t1", title: "[\u{1F5E3}🫵]103" }], map);
+    expect(plan.renames).toEqual([]);
+    expect(plan.creates).toEqual([]);
+  });
+
+  test("follows a readiness-label flip (labels are the source of truth)", () => {
+    // tab shows 🫵; ticket now carries ready-for-agent → tab flips to 🤖
+    const map = mapOf(101, [sub(103, "open", 0, ["wayfinder:research", "ready-for-agent"])]);
+    const plan = planTabs([shell, { id: "t1", title: "[🔎🫵]103" }], map);
+    expect(plan.renames).toEqual([{ id: "t1", from: "[🔎🫵]103", to: "[🔎🤖]103" }]);
+  });
+
+  test("updates the type emoji when the ticket's label changed", () => {
+    // tab was minted as research; ticket re-labelled to grilling — X updates
+    const map = mapOf(101, [sub(103, "open", 0, ["wayfinder:grilling", "ready-for-agent"])]);
+    const plan = planTabs([shell, { id: "t1", title: "[🔎🤖]103" }], map);
+    expect(plan.renames).toEqual([{ id: "t1", from: "[🔎🤖]103", to: "[🗣️🤖]103" }]);
+  });
+
+  test("leaves a done tab alone while its ticket stays closed", () => {
     const map = mapOf(101, [sub(103, "closed")]);
-    const plan = planTabs([shell, { id: "t1", title: "✓103" }], map);
+    const plan = planTabs([shell, { id: "t1", title: "[🔨✓]103" }], map);
     expect(plan.creates).toEqual([]);
     expect(plan.renames).toEqual([]);
   });
@@ -199,14 +303,24 @@ describe("planTabs", () => {
 
   test("desiredOrder merges existing + created tabs, ascending by ticket", () => {
     const map = mapOf(101, [sub(103, "open"), sub(107, "open"), sub(121, "open")]);
-    const plan = planTabs([shell, { id: "t2", title: "107" }], map);
+    const plan = planTabs([shell, { id: "t2", title: "[🔨🫵]107" }], map);
     expect(plan.creates.map((c) => c.ticket)).toEqual([103, 121]);
     expect(plan.desiredOrder).toEqual([103, 107, 121]);
   });
 
   test("additive path never populates closes", () => {
     const map = mapOf(101, [sub(103, "closed"), sub(107, "open")]);
-    const plan = planTabs([shell, { id: "t1", title: "✓103" }, { id: "t2", title: "107" }], map);
+    const plan = planTabs(
+      [shell, { id: "t1", title: "[🔨✓]103" }, { id: "t2", title: "[🔨🫵]107" }],
+      map,
+    );
+    expect(plan.closes).toEqual([]);
+  });
+
+  test("leaves a stale tab (ticket gone from the map) alone on the additive path", () => {
+    const map = mapOf(101, [sub(107, "open")]); // 103 vanished
+    const plan = planTabs([shell, { id: "t1", title: "[🔨🫵]103" }, { id: "t2", title: "[🔨🫵]107" }], map);
+    expect(plan.renames).toEqual([]);
     expect(plan.closes).toEqual([]);
   });
 });
@@ -217,22 +331,26 @@ describe("planTabs --prune", () => {
 
   test("closes a closed ticket's tab instead of ✓-renaming it", () => {
     const map = mapOf(101, [sub(103, "closed"), sub(107, "open")]);
-    const plan = planTabs([shell, { id: "t1", title: "103" }, { id: "t2", title: "107" }], map, prune);
-    expect(plan.closes).toEqual([{ id: "t1", title: "103", ticket: 103 }]);
+    const plan = planTabs(
+      [shell, { id: "t1", title: "[🔨🫵]103" }, { id: "t2", title: "[🔨🫵]107" }],
+      map,
+      prune,
+    );
+    expect(plan.closes).toEqual([{ id: "t1", title: "[🔨🫵]103", ticket: 103 }]);
     expect(plan.renames).toEqual([]);
     expect(plan.desiredOrder).toEqual([107]); // 103 dropped
   });
 
-  test("closes an already-✓ tab whose ticket stays closed", () => {
+  test("closes an already-done tab whose ticket stays closed", () => {
     const map = mapOf(101, [sub(103, "closed")]);
-    const plan = planTabs([shell, { id: "t1", title: "✓103" }], map, prune);
-    expect(plan.closes).toEqual([{ id: "t1", title: "✓103", ticket: 103 }]);
+    const plan = planTabs([shell, { id: "t1", title: "[🔨✓]103" }], map, prune);
+    expect(plan.closes).toEqual([{ id: "t1", title: "[🔨✓]103", ticket: 103 }]);
     expect(plan.desiredOrder).toEqual([]);
   });
 
-  test("closes a stale tab whose ticket vanished from the map", () => {
+  test("closes a stale tab whose ticket vanished from the map (legacy title too)", () => {
     const map = mapOf(101, [sub(107, "open")]); // 103 no longer a sub-issue
-    const plan = planTabs([shell, { id: "t1", title: "103" }, { id: "t2", title: "107" }], map, prune);
+    const plan = planTabs([shell, { id: "t1", title: "103" }, { id: "t2", title: "[🔨🫵]107" }], map, prune);
     expect(plan.closes).toEqual([{ id: "t1", title: "103", ticket: 103 }]);
   });
 
@@ -240,14 +358,18 @@ describe("planTabs --prune", () => {
     // 103 re-blocked (open, blocked_by 1) → off frontier but a live session may
     // be mid-work: prune must not close it.
     const map = mapOf(101, [sub(103, "open", 1), sub(107, "open")]);
-    const plan = planTabs([shell, { id: "t1", title: "103" }, { id: "t2", title: "107" }], map, prune);
+    const plan = planTabs(
+      [shell, { id: "t1", title: "[🔨🫵]103" }, { id: "t2", title: "[🔨🫵]107" }],
+      map,
+      prune,
+    );
     expect(plan.closes).toEqual([]);
     expect(plan.desiredOrder).toEqual([103, 107]);
   });
 
   test("still creates frontier tabs while pruning", () => {
     const map = mapOf(101, [sub(103, "closed"), sub(107, "open")]);
-    const plan = planTabs([shell, { id: "t1", title: "103" }], map, prune);
+    const plan = planTabs([shell, { id: "t1", title: "[🔨🫵]103" }], map, prune);
     expect(plan.creates.map((c) => c.ticket)).toEqual([107]);
     expect(plan.closes.map((c) => c.ticket)).toEqual([103]);
   });
