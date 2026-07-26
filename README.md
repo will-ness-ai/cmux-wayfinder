@@ -44,10 +44,24 @@ bun src/sync.ts --dry-run     # print the plan, touch nothing
 bun src/sync.ts               # materialize into live cmux (additive + rename-only)
 bun src/sync.ts --prune       # also close stale tabs / dead-map workspaces
 bun src/sync.ts --config path/to/tracked.yaml
+bun src/sync.ts --watch       # re-sync every 30s until killed
+bun src/sync.ts --watch 120   # ... every 120s
 ```
+
+`bun link` registers the `cmux-sync` command globally, so a cmux terminal tab
+can just run `cmux-sync --watch`.
 
 `--dry-run` is the safe way to preview: it does the real GitHub reads and prints
 every group/workspace/tab it *would* create, without contacting cmux.
+
+`--watch [sec]` loops forever: sync, sleep `sec` seconds (default 30), repeat —
+runs never overlap, and `tracked.yaml` is re-read each pass. GitHub's budget is
+5,000 authenticated requests/hour (shared with everything else `gh` does on your
+token); a pass costs ~2 GETs per repo + 1 per open map, so 30s (120 passes/hr)
+is comfortable for typical setups — e.g. 3 repos / 6 maps ≈ 1,440/hr. The loop
+warns if projected spend crosses half the budget, and on a failed pass it checks
+`gh api rate_limit` (a free endpoint) and sleeps until the window resets if the
+budget is exhausted.
 
 A live run **does start agents**: each new tab launches `claude` on its worktree,
 waits for the TUI, types the `/wayfinder …` prompt and submits it. Only *new*

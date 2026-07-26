@@ -11,11 +11,13 @@
  * moves focus. `--prune` additionally closes done/stale ticket tabs and the
  * workspaces of closed/untracked maps (plus stray group anchors) — the only
  * path that ever closes anything. `--dry-run` prints the plan without touching
- * cmux.
+ * cmux. `--watch [sec]` re-syncs every `sec` seconds (default 30) until killed,
+ * with GitHub rate-budget guardrails (see `watch`).
  *
- *   bun src/sync.ts [--config tracked.yaml] [--dry-run] [--prune]
+ *   bun src/sync.ts [--config tracked.yaml] [--dry-run] [--prune] [--watch [sec]]
  */
 
+import { sh } from "./proc.ts";
 import { loadTracked, type TrackedRepo } from "./config.ts";
 import { readFrontierFor, resolveRepo, type WayfinderMap } from "./frontier.ts";
 import * as cmux from "./cmux.ts";
@@ -36,16 +38,26 @@ interface Options {
   configPath: string;
   dryRun: boolean;
   prune: boolean;
+  /** Re-sync every N seconds until killed; null = single run. */
+  watchSec: number | null;
 }
 
 function parseArgs(argv: string[]): Options {
-  const opts: Options = { configPath: "tracked.yaml", dryRun: false, prune: false };
+  const opts: Options = { configPath: "tracked.yaml", dryRun: false, prune: false, watchSec: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") opts.dryRun = true;
     else if (a === "--prune") opts.prune = true;
     else if (a === "--config") opts.configPath = argv[++i]!;
-    else {
+    else if (a === "--watch") {
+      // Optional interval argument: `--watch 60`; bare `--watch` = 30s.
+      const next = argv[i + 1];
+      opts.watchSec = next !== undefined && /^\d+$/.test(next) ? Number(argv[++i]) : 30;
+      if (opts.watchSec < 5) {
+        console.error("--watch interval must be at least 5 seconds");
+        process.exit(2);
+      }
+    } else {
       console.error(`unknown argument: ${a}`);
       process.exit(2);
     }
@@ -256,14 +268,77 @@ async function prune(desired: Set<string>, opts: Options, log: Logger) {
   }
 }
 
+/**
+ * One full sync pass. Reloads tracked.yaml each time so watch mode picks up
+ * config edits between ticks. Returns the run's shape for the watch loop's
+ * rate-budget estimate.
+ */
+async function runSync(opts: Options, log: Logger): Promise<{ repos: number; maps: number }> {
+  const tracked = await loadTracked(opts.configPath);
+  const desired = new Set<string>();
+  for (const repo of tracked) {
+    await syncRepo(repo, opts, log, desired);
+  }
+  if (opts.prune) await prune(desired, opts, log);
+  console.log(opts.dryRun ? "\n(dry run — no changes made)" : "\nsync complete");
+  return { repos: tracked.length, maps: desired.size };
+}
+
+/** GitHub's primary REST budget for an authenticated user token. */
+const GH_HOURLY_LIMIT = 5000;
+
+/**
+ * If the token's core REST budget is exhausted, seconds until it resets
+ * (else null). `GET /rate_limit` itself never counts against the limit, so
+ * this probe is free. Errors (offline, gh missing) read as "not exhausted".
+ */
+async function rateLimitResetDelay(): Promise<number | null> {
+  try {
+    const out = await sh(["gh", "api", "rate_limit", "--jq", ".resources.core | [.remaining, .reset] | @tsv"]);
+    const [remaining, reset] = out.trim().split("\t").map(Number);
+    if (!Number.isFinite(remaining) || !Number.isFinite(reset) || remaining > 0) return null;
+    return Math.max(0, reset - Math.floor(Date.now() / 1000)) + 5;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `--watch`: sync forever, sleeping `watchSec` between the end of one pass and
+ * the start of the next (runs never overlap). Rate-limit posture: a pass costs
+ * ~2 GETs per repo (resolve + map list) + 1 per open map against the shared
+ * 5,000/hr budget — at the default 30s cadence that's 120 × (2·repos + maps)
+ * per hour, e.g. 3 repos / 6 maps ≈ 1,440/hr. We warn once if the projected
+ * spend crosses half the budget, and a failed pass checks for exhaustion and
+ * sleeps until the window resets instead of hammering.
+ */
+async function watch(opts: Options, log: Logger) {
+  log.info(`watching: syncing every ${opts.watchSec}s (ctrl-c to stop)`);
+  let warnedBudget = false;
+  for (;;) {
+    log.info(`\n── sync @ ${new Date().toLocaleTimeString()} ──`);
+    try {
+      const { repos, maps } = await runSync(opts, log);
+      const perHour = Math.round((3600 / opts.watchSec!) * (2 * repos + maps));
+      if (!warnedBudget && perHour > GH_HOURLY_LIMIT / 2) {
+        warnedBudget = true;
+        log.info(
+          `⚠ projected ~${perHour} GitHub API calls/hr — over half the ${GH_HOURLY_LIMIT}/hr budget; consider a longer --watch interval`,
+        );
+      }
+    } catch (e) {
+      console.error(`sync failed: ${e instanceof Error ? e.message : e}`);
+      const wait = await rateLimitResetDelay();
+      if (wait !== null) {
+        log.info(`⚠ GitHub rate limit exhausted — sleeping ${Math.ceil(wait / 60)} min until it resets`);
+        await Bun.sleep(wait * 1000);
+      }
+    }
+    await Bun.sleep(opts.watchSec! * 1000);
+  }
+}
+
 const opts = parseArgs(process.argv.slice(2));
 const log = makeLog(opts.dryRun);
-const tracked = await loadTracked(opts.configPath);
-
-const desired = new Set<string>();
-for (const repo of tracked) {
-  await syncRepo(repo, opts, log, desired);
-}
-if (opts.prune) await prune(desired, opts, log);
-
-console.log(opts.dryRun ? "\n(dry run — no changes made)" : "\nsync complete");
+if (opts.watchSec !== null) await watch(opts, log);
+else await runSync(opts, log);

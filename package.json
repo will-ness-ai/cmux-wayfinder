@@ -4,6 +4,9 @@
   "private": false,
   "type": "module",
   "description": "Materialize wayfinder map frontiers into cmux workspaces",
+  "bin": {
+    "cmux-sync": "./src/sync.ts"
+  },
   "module": "src/frontier.ts",
   "license": "MIT",
   "author": "Will Ness",
