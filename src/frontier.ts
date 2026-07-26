@@ -27,6 +27,8 @@ export interface SubIssue {
   /** open && blockedBy === 0 — takeable right now. */
   unblocked: boolean;
   assignees: string[];
+  /** Label names — carries the `wayfinder:<type>` ticket-type label. */
+  labels: string[];
   url: string;
 }
 
@@ -65,6 +67,7 @@ function toSubIssue(raw: any): SubIssue {
     blockedBy,
     unblocked: state === "open" && blockedBy === 0,
     assignees: (raw.assignees ?? []).map((a: any) => a.login),
+    labels: (raw.labels ?? []).map((l: any) => l?.name).filter(Boolean),
     url: raw.html_url,
   };
 }

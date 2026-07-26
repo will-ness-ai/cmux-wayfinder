@@ -28,12 +28,22 @@ Reads `tracked.yaml` (list of tracked repos + local checkout paths), discovers o
   the sidebar reads by name while sync still matches on the stable id
 - one **browser tab** per workspace (title `map #<map#>`), open to the map
   issue — *enforced*: recreated (pinned leftmost) if you close it
-- one **tab** per open+unblocked sub-issue (title `<ticket#>`): launches
+- one **tab** per open+unblocked sub-issue (title `[XY]<ticket#>`): launches
   `claude --worktree wayfinder/<map#>/<ticket#>`, waits for the TUI, then types
   `/wayfinder map #<map#> work on ticket #<ticket#>` into the input box and
   **submits it** — each new tab lands already working its ticket
 
-Sync is additive + rename-only by default (closed tickets → `✓<n>` tabs); nothing is closed without `--prune`.
+Tab titles are `[XY]<ticket#>`:
+
+- **X** — ticket type, from the `wayfinder:<type>` label: 🗣️ grilling, 🔨 task,
+  🔎 research, 🧪 prototype (unlabeled counts as a task)
+- **Y** — whose turn it is: 🫵 ready-for-human, 🤖 ready-for-agent. The ticket's
+  `ready-for-human` / `ready-for-agent` labels are the source of truth (flip the
+  label to flip the tab; human wins if both are present); a ticket with neither
+  defaults HITL → 🫵. ✓ takes the slot once the ticket closes. Legacy
+  `<n>`/`✓<n>` tabs upgrade to the bracketed form on the next run.
+
+Sync is additive + rename-only by default (closed tickets → `[X✓]<n>` tabs); nothing is closed without `--prune`.
 
 ## Usage
 
@@ -74,8 +84,9 @@ v2 `cmux rpc` socket.
 
 `--prune` is the only path that ever closes anything (never the default). It
 runs a normal additive sync first, then closes:
-- **done/stale ticket tabs** — a managed `<n>`/`✓<n>` tab whose ticket is no
-  longer open (closed, or dropped from the map). A ticket that is still open but
+- **done/stale ticket tabs** — a managed `[XY]<n>` (or legacy `<n>`/`✓<n>`) tab
+  whose ticket is no longer open (closed, or dropped from the map). A ticket
+  that is still open but
   merely fell off the frontier (re-blocked) keeps its tab, so a live session is
   never yanked out from under you.
 - **dead/untracked map workspaces** — a wayfinder workspace whose map has closed
