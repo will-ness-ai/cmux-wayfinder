@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lanes board prototype</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; }
+  #stage { min-height: 100vh; }
+  button { font: inherit; cursor: pointer; }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+  /* ============ picker ============ */
+  #picker {
+    position: fixed; right: 18px; bottom: 18px; z-index: 900;
+    width: 272px; border-radius: 10px; overflow: hidden;
+    background: rgba(22, 25, 32, 0.94); color: #e8ebf0;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.08);
+    font-family: system-ui, -apple-system, sans-serif; font-size: 12.5px;
+    user-select: none; backdrop-filter: blur(6px);
+  }
+  #picker header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 10px; cursor: grab;
+    background: rgba(255,255,255,0.06);
+    font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: #9aa3b2;
+  }
+  #picker header:active { cursor: grabbing; }
+  #picker .grip { opacity: 0.5; }
+  #picker .row { display: flex; align-items: center; gap: 8px; padding: 10px 10px 4px; }
+  #picker .arrow {
+    width: 30px; height: 30px; border-radius: 7px; border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(255,255,255,0.05); color: #e8ebf0; font-size: 14px; line-height: 1;
+  }
+  #picker .arrow:hover { background: rgba(255,255,255,0.14); }
+  #variant-name { flex: 1; text-align: center; }
+  #variant-name b { display: block; font-size: 13.5px; }
+  #variant-name span { color: #9aa3b2; font-size: 10.5px; }
+  #picker .datasets { display: flex; gap: 5px; padding: 8px 10px 10px; }
+  #picker .datasets button {
+    flex: 1; padding: 5px 2px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12);
+    background: transparent; color: #b9c1cd; font-size: 10.5px; line-height: 1.25;
+  }
+  #picker .datasets button.on {
+    background: #e8ebf0; color: #16181d; border-color: #e8ebf0; font-weight: 600;
+  }
+  #picker .hint { padding: 0 10px 8px; color: #6f7889; font-size: 10px; text-align: center; }
+
+  /* ============ modal ============ */
+  #scrim {
+    position: fixed; inset: 0; z-index: 800; background: rgba(10,12,16,0.55);
+    display: none; align-items: center; justify-content: center; padding: 4vh 16px;
+  }
+  #scrim.open { display: flex; }
+  #modal {
+    width: min(680px, 100%); max-height: 88vh; overflow-y: auto;
+    background: #fff; color: #23262d; border-radius: 12px;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.5); padding: 22px 26px;
+  }
+  #modal .m-head { display: flex; align-items: flex-start; gap: 10px; }
+  #modal .m-head h2 { margin: 0; font-size: 18px; line-height: 1.3; flex: 1; text-wrap: balance; }
+  #modal .m-num { color: #7a828f; font-weight: 400; }
+  #modal .m-close {
+    border: none; background: #eef0f3; border-radius: 6px; width: 28px; height: 28px;
+    font-size: 14px; color: #555;
+  }
+  #modal .m-meta {
+    display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 4px;
+    font-size: 11.5px;
+  }
+  #modal .m-meta span {
+    background: #f0f2f5; border-radius: 20px; padding: 3px 10px; color: #4a5160;
+  }
+  #modal .m-meta span.lane-chip { font-weight: 600; }
+  #modal .m-body { font-size: 14px; line-height: 1.65; }
+  #modal .m-body h2 { font-size: 15px; margin: 18px 0 6px; }
+  #modal .m-body h3 { font-size: 13.5px; margin: 14px 0 4px; }
+  #modal .m-body ul { padding-left: 22px; margin: 6px 0; }
+  #modal .m-body li { margin: 3px 0; }
+  #modal .m-body code {
+    background: #f0f2f5; border-radius: 4px; padding: 1px 5px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+  }
+  #modal .m-body pre {
+    background: #f0f2f5; border-radius: 8px; padding: 12px; overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5;
+  }
+  #modal .m-body pre code { background: none; padding: 0; }
+  #modal .m-body a { color: #2563c4; }
+  #modal .m-foot { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e8eaee; }
+  #modal .m-foot a {
+    color: #2563c4; text-decoration: none; font-size: 13px; font-weight: 500;
+  }
+  #modal .m-foot a:hover { text-decoration: underline; }
+
+  /* ============ CLASSIC ledger — converged base ============ */
+  .v-classic { background: #fcfcfd; color: #24292f; min-height: 100vh; padding: 30px 36px 110px;
+    font-size: 13px; }
+  .v-classic .board-title { font-size: 17px; font-weight: 650; margin-bottom: 2px; }
+  .v-classic .board-title a { color: inherit; text-decoration: none; }
+  .v-classic .board-title a:hover { text-decoration: underline; }
+  .v-classic .board-sub { font-size: 12px; color: #6e7781; margin-bottom: 14px; }
+  .v-classic .board-sub .m-cnt { font-weight: 600; }
+  .v-classic .board-sub .m-cnt.c-blocked { color: #c13f37; }
+  .v-classic .board-sub .m-cnt.c-frontier { color: #1a7f37; }
+  .v-classic .board-sub .m-cnt.c-inprogress { color: #205a9e; }
+  .v-classic .board-sub .m-cnt.c-resolved { color: #6e7781; }
+  .v-classic .legend { display: flex; gap: 14px; margin: 0 0 10px; font-size: 11px; color: #6e7781; }
+  .v-classic .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+    margin-right: 5px; vertical-align: -1px; font-style: normal; }
+  .v-classic .legend .l-blk i { background: #fff3cd; border: 1px solid #e8d48a; }
+  .v-classic .legend .l-dep i { background: #e3f0fd; border: 1px solid #a9cdf4; }
+
+  .v-classic .strip { display: flex; gap: 10px; margin: 0 0 16px; flex-wrap: wrap; }
+  .v-classic .stat { border-radius: 8px; padding: 8px 14px 7px; min-width: 104px;
+    border: 1px solid #dde1e6; background: #fff; }
+  .v-classic .stat b { display: block; font-size: 20px; font-weight: 650; line-height: 1.1;
+    font-variant-numeric: tabular-nums; }
+  .v-classic .stat span { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    font-weight: 600; }
+  .v-classic .stat.s-blocked { border-color: #f1b8b4; } .v-classic .stat.s-blocked span { color: #c13f37; }
+  .v-classic .stat.s-frontier { border-color: #b1dfbb; } .v-classic .stat.s-frontier span { color: #1a7f37; }
+  .v-classic .stat.s-inprogress { border-color: #b6d2f2; } .v-classic .stat.s-inprogress span { color: #205a9e; }
+  .v-classic .stat.s-resolved { border-color: #d8dde3; } .v-classic .stat.s-resolved span { color: #6e7781; }
+  .v-classic .stat.s-zero { opacity: 0.45; }
+
+  .v-classic .grid-wrap { overflow-x: auto; border: 1px solid #d8dde3; border-radius: 8px;
+    position: relative; }
+  .v-classic table { border-collapse: collapse; width: 100%; min-width: 640px; }
+  .v-classic thead th { text-align: left; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.07em; color: #6e7781; font-weight: 600; padding: 8px 12px;
+    border-bottom: 1px solid #d8dde3; background: #f6f8fa; }
+  .v-classic .sec td { padding: 7px 12px; font-size: 11.5px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase; background: #f6f8fa;
+    border-top: 1px solid #d8dde3; border-bottom: 1px solid #e6eaef; cursor: pointer; }
+  .v-classic .sec .chev { display: inline-block; width: 14px; color: #8b949e; font-size: 9px; }
+  .v-classic .sec .cnt { color: #8b949e; font-weight: 500; margin-left: 8px; }
+  .v-classic .sec-blocked td { color: #c13f37; box-shadow: inset 3px 0 0 #e5534b; }
+  .v-classic .sec-frontier td { color: #1a7f37; box-shadow: inset 3px 0 0 #2da44e; }
+  .v-classic .sec-inprogress td { color: #205a9e; box-shadow: inset 3px 0 0 #3b82d9; }
+  .v-classic .sec-resolved td { color: #6e7781; box-shadow: inset 3px 0 0 #afb8c1; }
+  .v-classic tbody tr.t { cursor: pointer; }
+  .v-classic tbody tr.t:hover { background: #f3f6f9; }
+  .v-classic tbody tr.hidden-lane { display: none; }
+  .v-classic td { padding: 7px 12px; border-bottom: 1px solid #eef1f4;
+    font-variant-numeric: tabular-nums; transition: background 0.15s, opacity 0.15s; }
+  .v-classic td.num { color: #6e7781; width: 56px; }
+  .v-classic td.emo { width: 52px; }
+  .v-classic tr.done td.title { color: #8b949e; text-decoration: line-through; }
+  .v-classic td.who { width: 120px; font-size: 12px; color: #205a9e; }
+  .v-classic td.wait { width: 170px; font-size: 12px; }
+  .v-classic tr.zero td { color: #b0b7bf; font-size: 12px; font-style: italic; }
+
+  /* waiting-on chips */
+  .wref { display: inline-block; padding: 1px 7px; border-radius: 5px; margin: 0 2px 2px 0;
+    background: #ffe5e2; color: #b3372f; font-weight: 600; cursor: pointer;
+    transition: background 0.12s, transform 0.12s; }
+  .wref:hover { background: #f6b8b2; transform: translateY(-1px); }
+  .wref.hist { background: #eef0f3; color: #8a919b; font-weight: 400;
+    text-decoration: line-through; }
+  .wref.hist:hover { background: #dde1e6; }
+
+  /* chip click → jump + flash */
+  @keyframes rowflash { 0% { background: #ffd9a0; } 100% { background: transparent; } }
+  tr.flash td { animation: rowflash 1.4s ease-out; }
+
+  /* two-way spotlight: dim the rest, tint the related */
+  .v-classic table.fx-on tr.t:not(.fx-keep) td { opacity: 0.3; }
+  .v-classic table.fx-on tr.sec td { opacity: 0.5; }
+  .v-classic tr.fx-src.fx-keep td { background: #fff; }
+  .v-classic tr.fx-blk td { background: #fff3cd; }
+  .v-classic tr.fx-blk td.num { color: #8a6d1a; font-weight: 700; }
+  .v-classic tr.fx-dep td { background: #e3f0fd; }
+  .v-classic tr.fx-dep td.num { color: #205a9e; font-weight: 700; }
+</style>
+</head>
+<body>
+
+
+<div id="stage"></div>
+
+<div id="picker">
+  <header id="picker-drag"><span class="grip">⠿</span> lanes board · converged</header>
+  <div class="datasets" id="datasets"></div>
+  <div class="hint">demo data · hover rows + chips · click a chip to jump · sections collapse</div>
+</div>
+
+<div id="scrim">
+  <div id="modal" role="dialog" aria-modal="true">
+    <div class="m-head">
+      <h2 id="m-title"></h2>
+      <button class="m-close" id="m-close" aria-label="Close">✕</button>
+    </div>
+    <div class="m-meta" id="m-meta"></div>
+    <div class="m-body" id="m-body"></div>
+    <div class="m-foot"><a id="m-link" target="_blank" rel="noopener">Open on GitHub ↗</a></div>
+  </div>
+</div>
+
+<script>
+const DATA = {"tickets":{"196":{"assignees":["will-ness-ai"],"body":"## Question\n\nSurvey the **entire menu of established lifting best practices**, so the follow-on grill can decide which ones Will adopts. Produce a markdown asset in the repo (`docs/research/lifting-best-practices.md`) laying out the field of options — not a recommendation, the landscape:\n\n- **Progressive-overload schemes** — linear progression, double progression, percentage / %1RM, RPE-based autoregulation; when each fits.\n- **Autoregulation & RPE/RIR** — what the scale is, how it drives load adjustment, tradeoffs vs fixed prescription.\n- **Volume** — sets-per-muscle-per-week landmarks (MEV / MAV / MRV) and how volume is counted.\n- **Rep-range prescription** — strength vs hypertrophy vs endurance ranges; ranges by exercise type.\n- **Warmup protocols** — ramp sets, whether/how they're tracked.\n- **Deloads** — triggers (fatigue, stalls, calendar) and forms.\n- **Exercise selection & substitution** — compound vs isolation, movement-pattern balance, substituting within an equipment constraint.\n- **Session / weekly structure** — full-body vs splits (PPL, upper/lower), frequency per muscle.\n\n**Method:** `/research` against high-trust primary sources (e.g. Renaissance Periodization, Stronger by Science, Barbell Medicine, peer-reviewed reviews). AFK — no decisions here, just the field of options for the grill. Link the asset from this issue on resolution.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/196","labels":["wayfinder:research"],"number":196,"state":"closed","title":"Research: the lifting best-practices menu"},"197":{"assignees":["will-ness-ai"],"body":"## Question\n\nWith the best-practices menu in hand (blocked-by research ticket), decide **which principles Will adopts** — this becomes the `/workout` generator's rulebook and retroactively settles data-model details:\n\n- **Progression scheme** the generator uses (linear / double-progression / RPE-based / %1RM).\n- **RPE / effort** — is it captured per set (the optional Set-atom field), and how does the generator use it to autoregulate load?\n- **Warmups** — modeled/tracked, or working sets only?\n- **Rep ranges** — defaults, and how they vary by exercise / goal.\n- **Deloads** — does the generator trigger them, and on what signal?\n- **Volume & frequency** — target sets-per-muscle-per-week, session frequency.\n- **Exercise-selection** priorities.\n\n**And the Goals Profile:** capture Will's concrete **training goals** (strength targets, hypertrophy, specific lifts, aesthetics, constraints / injuries) and decide the **Goals Profile's shape** — a singular LLM-native text blob the skill fetches. Output = the goals-profile content, ready to seed (the literal Mongo write is build-time).\n\n**Method:** `/grilling` + `/domain-modeling`, one question at a time. HITL — the principles and goals are Will's calls. The decided principles feed the generation-surface ticket; the finalized optional Set-atom fields feed the data-model ticket.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/197","labels":["wayfinder:grilling"],"number":197,"state":"closed","title":"Grill: my training principles + goals profile"},"198":{"assignees":["will-ness-ai"],"body":"## Question\n\nSettle the **Gym Profile**: a singular, LLM-native **text field** describing available equipment that the `/workout` skill fetches before planning.\n\n- **Shape** — confirm it's one free-text equipment description (plus minimal metadata: name / notes), stored as a Mongo doc; decide the fields.\n- **Seed the apartment gym** — capture Will's actual apartment-gym inventory as the initial profile content (adjustable-dumbbell range, machines, cables, bench / rack, barbell?, etc.), rich enough for an LLM to plan around.\n\n**Method:** `/grilling` — walk Will's actual gym, capture the inventory. HITL. Output = the gym-profile content (ready to seed) + the storage shape. The literal Mongo write is build-time. Multiple gyms are out of scope for v1 (single gym).\n","html_url":"https://github.com/will-ness-ai/homebase/issues/198","labels":["wayfinder:grilling"],"number":198,"state":"closed","title":"Gym profile: shape + seed the apartment gym"},"199":{"assignees":["will-ness-ai"],"body":"## Question\n\nPin the **domain model + record shapes** (feeds `/to-spec`), given the locked product shape and the adopted principles:\n\n- **Entities & their Mongo shapes** — Exercise (catalog), Workout (planned), Session / log, Set, Gym Profile, Goals Profile: the fields each carries.\n- **Workout ↔ Session lifecycle** — one record with a status (pending → completed), or two entities? How \"Next Workout\" and \"History\" read off it.\n- **Exercise catalog** — identity (slug?), the agent's **auto-grow rule** (create only if the exact one is absent), and how a logged Set references an Exercise for data-over-time.\n- **Set atom** — finalize, including the optional fields the best-practices grill decided (RPE, warmup flag).\n- **Progression derivation** — how e1RM (formula) and PRs are computed / stored vs derived on read; what the per-exercise log table stores.\n- **Day boundary** — CT-local, reusing `localDateString` (consistent with mail / nutrition).\n\n**Method:** `/grilling` + `/domain-modeling`. HITL. Update `CONTEXT.md` with the workout glossary as terms lock.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/199","labels":["wayfinder:grilling"],"number":199,"state":"closed","title":"Data model & records: entities, lifecycle, progression derivation"},"200":{"assignees":["will-ness-ai"],"body":"## Question\n\nDesign the **generation surface** — how a planned workout gets built and reaches the phone:\n\n- **The `/workout <description>` skill** — its step-by-step: fetch gym + goals profiles, fetch recent history / trends, apply the adopted principles, build the plan, write it via the CLI. The skill body is the generator's brain (analog of `.claude/skills/mail-triage`).\n- **CLI contract** — the `./homebase workout …` subcommands the skill needs (fetch-context bundle, write-plan, read views) and their `--json` shapes. Deterministic I/O only; no LLM in the CLI.\n- **The context bundle** — the exact \"recent history + trends\" shape the CLI hands the agent at generation time.\n- **Write-back atomicity** — how the plan is written (idempotent upsert; is there a \"one pending workout\" rule, or are many pending allowed?) and how write-back doubles as the success signal.\n- **Plan → phone handoff** — how a plan written on the CLI surfaces as Next Workout on mobile.\n\n**Method:** `/grilling`, mirroring the shipped mail.exe loop. HITL. Depends on the adopted principles (rulebook), the two profile shapes, and the data model.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/200","labels":["wayfinder:grilling"],"number":200,"state":"closed","title":"Generation surface: the /workout skill + CLI contract"},"201":{"assignees":["will-ness-ai"],"body":"## Question\n\nConverge the **workout.exe skin + logging UX** for the three surfaces — the house-style windowed `.exe` look (`docs/design/theme.md`), mobile-first.\n\n- **Next Workout** — the plan-driven logging screen: how a prescribed exercise + its sets render, how you log a set (tap-done / thumb-edit actuals), the mobile ergonomics of logging mid-workout, the empty state.\n- **History** — reverse-chron Sessions, expandable to their logged sets.\n- **Exercises** — the catalog browser + the per-exercise page (raw log table + e1RM trend line + PR markers).\n\n**Method:** `/grilling-frontend-prototyping` — converge via rounds of concrete prototypes + verdicts, landing a `docs/design/prototypes/workout-skin-final.html` snapshot. HITL — Will judges the look. Depends on the data model (what's displayed).\n","html_url":"https://github.com/will-ness-ai/homebase/issues/201","labels":["wayfinder:prototype"],"number":201,"state":"closed","title":"The look: converge the workout.exe skin"},"210":{"assignees":["will-ness-ai"],"body":"## Question\n\nReplace the **provisional** gym-profile seed (authored from listing photos before move-in, see [docs/design/workout-gym-profile.md](https://github.com/will-ness-ai/homebase/blob/main/docs/design/workout-gym-profile.md)) with a **verified** inventory captured on-site.\n\nWalk the apartment building's gym and capture what the two photos couldn't confirm:\n\n- **Dumbbell range + increment** (the single most load-bearing fact for planning — determines heavy-press/row ceilings and progression granularity).\n- **Bench**: flat only vs. adjustable incline; how many.\n- **Keiser stations**: exactly which machines (functional trainer confirmed; how many press/other stations, their movements, resistance units/range).\n- Anything the photos missed — **barbell / squat rack / Smith / leg press / pull-up bar / kettlebells / bands** (all listed as *likely absent*, verify), plus any weight caps, hours, or space constraints worth telling the planner.\n\nThen **update the Mongo record** with the verified prose. **Non-blocking** and **deferrable to post-implementation** — the provisional seed is enough to build and plan against in the meantime.\n\n**Update strategy is in the first comment below.** HITL (only Will can walk the gym).\n","html_url":"https://github.com/will-ness-ai/homebase/issues/210","labels":["wayfinder:task"],"number":210,"state":"closed","title":"Enrich gym profile from a real on-site walkthrough"},"218":{"assignees":["will-ness-ai"],"body":"## Question\n\n**One-time bootstrap to load the system with real numbers.** Right now we know\n*nothing* about Will's actual working loads, so the very first generated\nworkouts would run entirely on the guess-then-hard-correct rule\n([#197 §1.10](https://github.com/will-ness-ai/homebase/blob/main/docs/design/workout-training-principles.md)).\nOne real session in the real gym replaces guesses with facts for the ~8\n**anchor** exercises — precisely the lifts whose e1RM trends and PRs get read\nfor years.\n\nOnce the gym is verified (#210), walk in and work up on **one anchor exercise\nper movement pattern** — squat · hinge · horizontal push · vertical push ·\nhorizontal pull · vertical pull · single-leg · carry/anti-rotation core — using\nwhatever the verified equipment actually supports.\n\n**Capture per anchor:** exercise name, the equipment/implement, **working load\n× reps**, and **last-set RIR**, at the prescribed proximity for its band\n(primary compounds: 5–8 reps @ 2–3 RIR).\n\n**Output = a doc** (a table of anchor → load × reps × RIR), following the #198\nprecedent: the literal Mongo write is build-time, so this does **not** block on\nthe data model (#199). Deliberately *not* a \"calibration session\" concept in the\nsystem — this is a one-off bootstrap that sits outside it, and gym changes are\nhandled by the ordinary cold-start rule.\n\n**Scope note:** anchors only. Accessory and isolation slots rotate by design\n(#197 §1.8), so they will always be new-to-catalog and are carried by the\ncold-start rule regardless.\n\n**Method:** HITL — only Will can lift in the gym. Blocked by #210 (needs the\nverified inventory to know which anchors are even possible) and #197 (needs the\nanchor/rep-band definitions).\n","html_url":"https://github.com/will-ness-ai/homebase/issues/218","labels":["wayfinder:task"],"number":218,"state":"closed","title":"Bootstrap: calibration session for real anchor loads"},"240":{"assignees":["will-ness-ai"],"body":"## Question\n\n**Author the `/workout` skill's Exercise-authoring supplement, proven on real exercises.** The data model ([#199](https://github.com/will-ness-ai/homebase/issues/199)) locked the shape of an Exercise's coaching content — `cues: string[]` (3–5 terse in-gym bullets) and `demoUrl: string | null` (best-effort, hot-linked). It did **not** settle whether that content can actually be sourced well, or how the skill should instruct the agent to produce it.\n\nRun **Claude Code in-session** (same session as the prototype) against **2–3 real exercises** — e.g. a barbell/Keiser compound, a machine movement, and a cable isolation — and:\n\n1. **Test cue authoring.** Can the agent write cues that are genuinely useful *in the gym* (setup · the one thing to watch · the common failure), terse enough to read holding a phone between sets? What's the right length/voice?\n2. **Test demo sourcing — is a findable gif realistic?** Try to locate a demo gif/video URL per exercise. Judge the hit rate and quality; confirm the \"hot-link, null when not found\" call from #199 survives contact, or surface a better one.\n3. **Output a `/writing-great-skills` supplement doc** for the `/workout` skill covering: how to author `cues`, how to source `demoUrl`, and the **catalog reuse-or-create matching** rule (reuse a slug from the TOON catalog bundle, create only if genuinely absent — [#199 §2.1](https://github.com/will-ness-ai/homebase/blob/main/docs/design/workout-data-model.md)). Optionally fold in the `loadGuess` semantics the data model handed to the skill.\n\n**Design note for the mechanism:** the production `/workout` planner should almost certainly research cues + `demoUrl` via a **subagent**, returning only the finished fields — keeping the main planner's context clean and focused on Will's goals, history, and the workout itself. The supplement should specify that seam, and the prototype is where we prove the subagent returns tight, correct context.\n\n**Output = the supplement doc** (linked asset) + a short verdict on demo-sourcing feasibility. This resolves the map's \"off-script exercise → catalog reconciliation\" fog only insofar as it fixes the *authoring/matching* guidance; the app-side free-typed/swapped-exercise reconciliation stays with the look/build tickets.\n\n**Method:** `/prototype` + `/writing-great-skills`. HITL.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/240","labels":["wayfinder:prototype"],"number":240,"state":"closed","title":"Prototype: Exercise coaching content — cues, demo media & the skill supplement"},"272":{"assignees":[],"body":"## Question\n\nWhere does purchaseable-item data come from — the source both hand-authoring and the future agentic recommender will draw product name/price/image/URL from? Survey and rank, then recommend one:\n\n- **Amazon PA-API 5.0** — gating (Associates account, qualifying-sales requirement), rate limits, image hot-linking terms.\n- **Other product APIs** — eBay Browse, Walmart, Best Buy; affiliate networks (ShopStyle Collective, Rakuten Advertising, CJ, Sovrn) — fashion coverage, approval friction, API shape.\n- **Search/scrape APIs** — SerpAPI-style Google Shopping products: pricing, ToS, reliability.\n- **Plain WebSearch from an agent** — is it realistic? How do its results rank against the structured options (freshness, image availability, link stability)?\n\nNeeded per item: name, price, image (hot-linkable or must-cache?), product URL, retailer. Precedent: workout demoUrl research proved a curl gate (200 + image/*) as a structural anti-hallucination check for hot-linked images.\n\nDeliverable: committed research doc + a ranked recommendation — closing this ticket = the data source is **selected**. AFK — resolve via `/research`.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/272","labels":["wayfinder:research"],"number":272,"state":"open","title":"Research: shopping-data source — where purchaseable items come from"},"273":{"assignees":[],"body":"## Question\n\nWhat belongs in Will's \"my fashion goals\" profile for it to actually steer future outfit/purchase recommendations? Research menswear styling guidance, capsule-wardrobe practice, and how styling services intake clients; produce a menu of profile dimensions with trade-offs — e.g. named aesthetics, fit/silhouette preferences, color palette, occasion mix (desk job / social / athletic), budget bands, brand affinities, hard no-go's.\n\nAlso prep the **taste-grill browse sheet**: an ordered itinerary over [OnPointFresh's 22 aesthetics](https://onpointfresh.com/types-of-aesthetics/) + [Stitch Fix's 7 types](https://www.stitchfix.com/men/blog/style-guides/find-your-personal-style/) + Pinterest spot-check search terms, sized to one 30–60 min browse session.\n\nDeliverable: committed doc the taste-elicitation grill runs against (workout precedent: `lifting-best-practices.md` menu → principles grill). AFK — resolve via `/research`.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/273","labels":["wayfinder:research"],"number":273,"state":"open","title":"Research: fashion-goals profile — dimensions menu + taste-grill browse sheet"},"274":{"assignees":[],"body":"## Question\n\nWhich models/API services can take photos of individual clothing items (or a stitched composite of them) plus a likeness photo of Will and generate an image of him wearing the outfit? Survey dedicated virtual try-on services (e.g. FASHN.ai, Kling try-on, Botika, Google's try-on work) and general image models (Gemini image generation, GPT-image). Per candidate: multi-garment support (an outfit is 3–5 pieces), input format (separate photos vs one composite), likeness fidelity, quality expectations, API access + pricing, ToS on generating images of a real person.\n\nDeliverable: committed research doc + a shortlist for the prototype ticket that follows. AFK — resolve via `/research`.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/274","labels":["wayfinder:research"],"number":274,"state":"open","title":"Research: outfit image generation — virtual try-on models and APIs"},"275":{"assignees":[],"body":"## Question\n\nWill's actual fashion taste and goals, captured as the prose that prepopulates **my fashion goals**. Will browses the identified resources (OnPointFresh's 22 aesthetics, Stitch Fix's 7 types, Pinterest spot-checks on whatever resonates) and reports back what he likes; the grill walks the profile-dimension menu from the research doc and locks the goals prose (likely a singleton prose store, workout Goals Profile precedent — exact shape belongs to the data-model grill).\n\nAlso settles what **goal-relevant** means, so the later closet-capture session knows which clothes to photograph.\n\nBlocked by #273 (fashion-goals profile research). HITL — resolve via `/grilling` + `/domain-modeling`.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/275","labels":["wayfinder:grilling"],"number":275,"state":"open","title":"Grill: taste elicitation — browse the styles, lock the fashion-goals prose"},"276":{"assignees":[],"body":"## Question\n\nDoes AI outfit visualization work well enough to be the outfit view's hero image? Will supplies sample garment photos + a likeness photo; run them through the research shortlist's top candidates, testing both input strategies (individual item photos vs one stitched composite); Will judges the outputs.\n\nThe verdict decides the outfit view: AI-generated try-on image as the default visual (cached per outfit, never regenerated — already locked at charting) vs fallback to item-photo grids. Also surfaces facts the data-model grill needs: input constraints, generation cost/latency, where generated images are stored.\n\nBlocked by #274 (virtual try-on research). HITL (Will's photos and judgment) — resolve via `/prototype`.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/276","labels":["wayfinder:prototype"],"number":276,"state":"open","title":"Prototype: outfit try-on — Will's garment photos through the shortlist"},"277":{"assignees":[],"body":"## Question\n\nDomain model + Mongo/core shapes for fashion.exe, under workout #199's **store-facts / derive-judgements** discipline:\n\n- **Item** (clothes inventory): attributes (category, color, brand, …), photo storage (private Vercel Blob precedent from nutrition.exe), lifecycle (retire? never-delete?), and how agent itemization from closet photos writes them.\n- **Outfit**: composition referencing owned Items *and* purchaseable items; the AI try-on image + human-uploaded photo pair with the default toggle; cache mechanics for the generated image (never regenerate).\n- **Recommended purchaseable**: record shape follows the selected data source (#272) — name / price / image / URL / retailer; authored via CLI; how staleness (dead links, price drift) is represented, if at all.\n- **Goals profile**: singleton prose store (workout Goals Profile precedent)?\n- **Glossary**: owns the `CONTEXT.md` entries for the app — Item vs clothing vs piece, Outfit, Purchaseable, and the try-on image terms.\n\nBlocked by #272 (data source shapes the purchaseable record) and #276 (try-on prototype surfaces image constraints). HITL — resolve via `/grilling` + `/domain-modeling`.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/277","labels":["wayfinder:grilling"],"number":277,"state":"open","title":"Grill: data model — items, outfits, purchaseables, goals"},"278":{"assignees":[],"body":"## Question\n\nThe skin and surface layout for fashion.exe: how the four surfaces present — **my fashion goals**, **clothes inventory**, **outfits**, **recommended purchaseables with the outfit view** mixing owned + buyable pieces — and how outfit images get hero treatment per the try-on prototype's verdict (AI image vs item-photo grid). Within the machine's constraints (`docs/design/theme.md`, windowed on mobile, machine voice).\n\nBlocked by #276 (the try-on verdict decides what the centerpiece visual even is). HITL — resolve via `/grilling-frontend-prototyping` converging variant loop.\n","html_url":"https://github.com/will-ness-ai/homebase/issues/278","labels":["wayfinder:prototype"],"number":278,"state":"open","title":"Prototype: fashion.exe look"}},"edges":{"196":[],"197":[196],"198":[],"199":[197],"200":[197,198,199],"201":[199],"210":[],"218":[210,197],"240":[199],"272":[],"273":[],"274":[],"275":[],"276":[],"277":[],"278":[]},"datasets":[{"id":"replay","short":"workout\nreplay","label":"workout.exe · map #195 (replay)","note":"real tickets + real blocked-by edges, replayed mid-flight (~13 days ago): all four lanes populated","tickets":[196,197,198,199,200,201,210,218,240],"overrides":{"196":{"state":"closed"},"197":{"state":"open","assignees":["will-ness-ai"]},"198":{"state":"closed"},"199":{"state":"open","assignees":[]},"200":{"state":"open","assignees":[]},"201":{"state":"open","assignees":[]},"210":{"state":"open","assignees":[]},"218":{"state":"open","assignees":[]},"240":{"state":"open","assignees":[]}}},{"id":"fashion","short":"fashion\nall-frontier","label":"fashion.exe · map #271","note":"live state today: 7 tickets, every one open, unblocked, unclaimed — the all-frontier shape","tickets":[272,273,274,275,276,277,278],"overrides":{}},{"id":"workout-now","short":"workout\nall-done","label":"workout.exe · map #195 (today)","note":"live state today: all 9 tickets resolved — the finished-map shape, historical edges only","tickets":[196,197,198,199,200,201,210,218,240],"overrides":{}}],"generatedAt":"Aug 2 at 1:00 PM"};
+
+const EMOJI = { grilling: "🗣️", task: "🔨", research: "🔎", prototype: "🧪" };
+const LANE_DEF = {
+  blocked:    { name: "Blocked" },
+  frontier:   { name: "Frontier" },
+  inprogress: { name: "In progress" },
+  resolved:   { name: "Resolved" },
+};
+const ORDER_FINAL = ["inprogress", "frontier", "blocked", "resolved"];
+const LANE_NAME = Object.fromEntries(Object.entries(LANE_DEF).map(([k, v]) => [k, v.name]));
+
+function typeOf(labels) {
+  for (const l of labels) {
+    const m = /^wayfinder:(grilling|task|research|prototype)$/.exec(l);
+    if (m) return m[1];
+  }
+  return "task";
+}
+
+function resolveDataset(ds) {
+  const ts = ds.tickets.map(n => {
+    const base = DATA.tickets[n];
+    const o = (ds.overrides && ds.overrides[n]) || {};
+    return { ...base, ...o };
+  });
+  const byN = Object.fromEntries(ts.map(t => [t.number, t]));
+  for (const t of ts) {
+    t.type = typeOf(t.labels);
+    t.emoji = EMOJI[t.type];
+    t.ready = t.state === "closed" ? "✓" :
+      t.labels.includes("ready-for-agent") ? "🤖" : "🫵";
+    const edges = (DATA.edges[t.number] || []).filter(b => byN[b]);
+    t.blockers = edges;
+    t.openBlockers = edges.filter(b => byN[b].state === "open");
+    t.lane = t.state === "closed" ? "resolved"
+      : t.openBlockers.length ? "blocked"
+      : (t.assignees && t.assignees.length) ? "inprogress"
+      : "frontier";
+  }
+  return { tickets: ts, byN };
+}
+
+function laneGroups(res) {
+  const g = { blocked: [], frontier: [], inprogress: [], resolved: [] };
+  for (const t of res.tickets) g[t.lane].push(t);
+  return g;
+}
+
+function esc(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+}
+
+/* ---- tiny markdown renderer ---- */
+function md(src) {
+  const lines = src.replace(/\r/g, "").split("\n");
+  let out = "", inList = false, inPre = false, pre = [];
+  const inline = s => esc(s)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>")
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|\s)(#(\d{1,4}))\b/g, '$1<b>$2</b>');
+  const closeList = () => { if (inList) { out += "</ul>"; inList = false; } };
+  for (const raw of lines) {
+    if (inPre) {
+      if (/^```/.test(raw)) { out += "<pre><code>" + esc(pre.join("\n")) + "</code></pre>"; inPre = false; pre = []; }
+      else pre.push(raw);
+      continue;
+    }
+    if (/^```/.test(raw)) { closeList(); inPre = true; continue; }
+    const h = /^(#{1,4})\s+(.*)/.exec(raw);
+    if (h) { closeList(); const lv = Math.min(h[1].length + 1, 4); out += `<h${lv}>${inline(h[2])}</h${lv}>`; continue; }
+    const li = /^\s*[-*]\s+(.*)/.exec(raw);
+    if (li) { if (!inList) { out += "<ul>"; inList = true; } out += "<li>" + inline(li[1]) + "</li>"; continue; }
+    closeList();
+    if (raw.trim() === "") continue;
+    out += "<p>" + inline(raw) + "</p>";
+  }
+  if (inPre) out += "<pre><code>" + esc(pre.join("\n")) + "</code></pre>";
+  closeList();
+  return out;
+}
+
+/* ---------------- render ---------------- */
+
+function waitCell(t, byN) {
+  return t.blockers.map(b => {
+    const open = byN[b].state === "open";
+    return `<span class="wref ${open ? "" : "hist"}" data-ref="${b}">#${b}</span>`;
+  }).join("");
+}
+
+function render(res, ds, v) {
+  const g = laneGroups(res);
+  const order = ORDER_FINAL;
+  let h = `<div class="v-classic">`;
+
+  // header
+  const mapUrl = `https://github.com/will-ness-ai/homebase/issues/${ds.map}`;
+  if (v.headerMeta) {
+    h += `<div class="board-title"><a href="${mapUrl}" target="_blank" rel="noopener">
+          <b>lanes</b> · ${esc(ds.label)} ↗</a></div>`;
+    const counts = order.map(l =>
+      `<span class="m-cnt c-${l}">${g[l].length} ${LANE_NAME[l].toLowerCase()}</span>`).join(" · ");
+    h += `<div class="board-sub">${counts} · generated ${esc(DATA.generatedAt)}</div>`;
+  } else {
+    h += `<div class="board-title"><b>lanes</b> · ${esc(ds.label)}</div>
+          <div class="board-sub">${esc(ds.note)}</div>`;
+  }
+
+  h += `<div class="legend"><span class="l-blk"><i></i>waits on (blockers)</span>
+        <span class="l-dep"><i></i>unblocks (dependents)</span></div>`;
+
+  if (v.strip) {
+    h += `<div class="strip">`;
+    for (const l of order)
+      h += `<div class="stat s-${l} ${g[l].length ? "" : "s-zero"}">
+            <b>${g[l].length}</b><span>${LANE_NAME[l]}</span></div>`;
+    h += `</div>`;
+  }
+
+  h += `<div class="grid-wrap"><table>
+    <thead><tr><th>#</th><th>Type</th><th>Title</th><th>Assignee</th><th>Waiting on</th></tr></thead><tbody>`;
+  for (const lane of order) {
+    const ts = g[lane];
+    if (!ts.length && v.hideEmpty) continue;
+    const collapsed = v.collapseResolved && lane === "resolved" && ts.length > 0;
+    h += `<tr class="sec sec-${lane}" data-sec="${lane}"><td colspan="5">
+          <span class="chev">${collapsed ? "▸" : "▾"}</span>${LANE_NAME[lane]}
+          <span class="cnt">${ts.length}</span></td></tr>`;
+    if (!ts.length) { h += `<tr class="zero"><td colspan="5">none</td></tr>`; continue; }
+    for (const t of ts) {
+      h += `<tr class="t ${t.state === "closed" ? "done" : ""} ${collapsed ? "hidden-lane" : ""}"
+        data-t="${t.number}" data-lane="${lane}">
+        <td class="num">#${t.number}</td>
+        <td class="emo">${t.emoji}${t.state === "open" ? t.ready : "✓"}</td>
+        <td class="title">${esc(t.title)}</td>
+        <td class="who">${t.state === "open" && t.assignees.length ? "@" + esc(t.assignees[0]) : ""}</td>
+        <td class="wait">${waitCell(t, res.byN)}</td></tr>`;
+    }
+  }
+  return h + `</tbody></table></div></div>`;
+}
+
+/* the converged design: In progress → Frontier → Blocked → Resolved,
+   summary strip, empty lanes hidden (strip still shows 0), Resolved collapsed */
+const CONFIG = { strip: true, hideEmpty: true, collapseResolved: true };
+
+let di = 0, current = null;
+
+function paint() {
+  const ds = DATA.datasets[di];
+  current = resolveDataset(ds);
+  document.getElementById("stage").innerHTML = render(current, ds, CONFIG);
+  document.querySelectorAll("#datasets button").forEach((b, i) =>
+    b.classList.toggle("on", i === di));
+}
+
+/* ---------------- two-way spotlight ---------------- */
+
+function rowOf(n) { return document.querySelector(`tr.t[data-t="${n}"]`); }
+
+function clearFx() {
+  document.querySelectorAll(".fx-keep, .fx-src, .fx-blk, .fx-dep").forEach(el =>
+    el.classList.remove("fx-keep", "fx-src", "fx-blk", "fx-dep"));
+  const tb = document.querySelector("#stage table");
+  if (tb) tb.classList.remove("fx-on");
+}
+
+function spotlight(srcRow, pairs) {
+  // pairs: [{row, cls}]
+  const tb = document.querySelector("#stage table");
+  if (!tb || !pairs.length) return;
+  tb.classList.add("fx-on");
+  if (srcRow) srcRow.classList.add("fx-src", "fx-keep");
+  for (const { row, cls } of pairs) { row.classList.add(cls, "fx-keep"); }
+}
+
+function fxForRow(tr) {
+  const n = +tr.dataset.t;
+  const t = current.byN[n];
+  if (!t) return;
+  const pairs = [];
+  for (const b of t.blockers) { const r = rowOf(b); if (r) pairs.push({ row: r, cls: "fx-blk" }); }
+  for (const other of current.tickets)
+    if (other.blockers.includes(n)) { const r = rowOf(other.number); if (r) pairs.push({ row: r, cls: "fx-dep" }); }
+  spotlight(tr, pairs);
+}
+
+function fxForChip(chip) {
+  const row = rowOf(+chip.dataset.ref);
+  const src = chip.closest("tr.t");
+  if (row) spotlight(src, [{ row, cls: "fx-blk" }]);
+}
+
+const stage = document.getElementById("stage");
+stage.addEventListener("mouseover", e => {
+  clearFx();
+  const chip = e.target.closest(".wref");
+  if (chip) { fxForChip(chip); return; }
+  const tr = e.target.closest("tr.t");
+  if (tr) fxForRow(tr);
+});
+stage.addEventListener("mouseleave", clearFx);
+
+/* clicks: chips jump, sections collapse, rows open the modal */
+stage.addEventListener("click", e => {
+  const chip = e.target.closest(".wref");
+  if (chip) {
+    e.stopPropagation();
+    const row = rowOf(+chip.dataset.ref);
+    if (row) {
+      row.classList.remove("hidden-lane");
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.remove("flash"); void row.offsetWidth;
+      row.classList.add("flash");
+    }
+    return;
+  }
+  const sec = e.target.closest("tr.sec");
+  if (sec) {
+    const lane = sec.dataset.sec;
+    const rows = document.querySelectorAll(`tr.t[data-lane="${lane}"]`);
+    const collapsed = rows.length && rows[0].classList.contains("hidden-lane");
+    rows.forEach(r => r.classList.toggle("hidden-lane", !collapsed));
+    const chev = sec.querySelector(".chev");
+    if (chev) chev.textContent = collapsed ? "▾" : "▸";
+    return;
+  }
+  const el = e.target.closest("tr.t");
+  if (el) openModal(+el.dataset.t);
+}, true);
+
+/* ---------------- modal ---------------- */
+function openModal(n) {
+  const t = current.byN[n];
+  document.getElementById("m-title").innerHTML =
+    `${t.emoji} <span class="m-num">#${t.number}</span> ${esc(t.title)}`;
+  const meta = [`<span class="lane-chip">${LANE_NAME[t.lane]}</span>`,
+    `<span>${t.type}</span>`];
+  if (t.assignees.length) meta.push(`<span>@${esc(t.assignees[0])}</span>`);
+  if (t.blockers.length) meta.push(`<span>blocked by ${t.blockers.map(b => "#" + b).join(", ")}</span>`);
+  document.getElementById("m-meta").innerHTML = meta.join("");
+  document.getElementById("m-body").innerHTML = md(t.body || "*no description*");
+  document.getElementById("m-link").href = t.html_url;
+  document.getElementById("scrim").classList.add("open");
+}
+document.getElementById("scrim").addEventListener("click", e => {
+  if (e.target.id === "scrim") e.currentTarget.classList.remove("open");
+});
+document.getElementById("m-close").addEventListener("click", () =>
+  document.getElementById("scrim").classList.remove("open"));
+
+/* ---------------- picker wiring ---------------- */
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") document.getElementById("scrim").classList.remove("open");
+  if (e.key >= "1" && e.key <= String(DATA.datasets.length)) { di = +e.key - 1; paint(); }
+});
+const dsBox = document.getElementById("datasets");
+DATA.datasets.forEach((ds, i) => {
+  const b = document.createElement("button");
+  b.textContent = ds.short;
+  b.addEventListener("click", () => { di = i; paint(); });
+  dsBox.appendChild(b);
+});
+
+/* drag the picker */
+(() => {
+  const p = document.getElementById("picker"), h = document.getElementById("picker-drag");
+  let sx, sy, ox, oy, dragging = false;
+  h.addEventListener("pointerdown", e => {
+    dragging = true; sx = e.clientX; sy = e.clientY;
+    const r = p.getBoundingClientRect(); ox = r.left; oy = r.top;
+    h.setPointerCapture(e.pointerId);
+  });
+  h.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    const x = Math.min(Math.max(0, ox + e.clientX - sx), innerWidth - p.offsetWidth);
+    const y = Math.min(Math.max(0, oy + e.clientY - sy), innerHeight - p.offsetHeight);
+    p.style.left = x + "px"; p.style.top = y + "px";
+    p.style.right = "auto"; p.style.bottom = "auto";
+  });
+  h.addEventListener("pointerup", () => dragging = false);
+})();
+
+paint();
+</script>
+
+</body>
+</html>
