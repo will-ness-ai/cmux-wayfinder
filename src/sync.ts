@@ -381,7 +381,7 @@ async function pruneWorkspaces(desired: Set<string>, opts: Options, log: Logger)
  */
 async function pruneBoards(desired: Set<string>, opts: Options, log: Logger) {
   const home = homedir();
-  const deletes = planBoardPrune(home, await listBoardFiles(boardCacheDir(home)), desired);
+  const deletes = planBoardPrune(home, await listCacheEntries(boardCacheDir(home)), desired);
   if (deletes.length === 0) {
     log.info(`prune: no stale board files`);
     return;
@@ -394,19 +394,19 @@ async function pruneBoards(desired: Set<string>, opts: Options, log: Logger) {
 }
 
 /**
- * Every `.html` file under the board cache root, as absolute paths. A cache
- * directory that doesn't exist yet (nothing generated on this machine) reads as
- * no files; any other read error is a real problem and propagates.
+ * Everything under the board cache root, as absolute paths — which of those are
+ * board files is {@link planBoardPrune}'s call. A cache directory that doesn't
+ * exist yet (nothing generated on this machine) reads as empty; any other read
+ * error is a real problem and propagates.
  */
-async function listBoardFiles(root: string): Promise<string[]> {
-  let entries: string[];
+async function listCacheEntries(root: string): Promise<string[]> {
   try {
-    entries = await readdir(root, { recursive: true });
+    const entries = await readdir(root, { recursive: true });
+    return entries.map((e) => join(root, e));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw e;
   }
-  return entries.filter((e) => e.endsWith(".html")).map((e) => join(root, e));
 }
 
 /**

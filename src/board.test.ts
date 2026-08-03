@@ -18,7 +18,7 @@ import {
   type BoardTicket,
 } from "./board.ts";
 import { toSubIssue } from "./frontier.ts";
-import { lanesTabTitle } from "./plan.ts";
+import { lanesTabTitle, workspaceDescription } from "./plan.ts";
 
 function ticket(number: number, over: Partial<BoardTicket> = {}): BoardTicket {
   return {
@@ -450,8 +450,9 @@ describe("cache file location", () => {
 describe("board-file prune", () => {
   const HOME = "/Users/ann";
   const board = (repo: string, map: number) => boardPath(HOME, repo, map);
+  // Built with the real producer, so the test keeps pace with the description format.
   const desired = (...pairs: [string, number][]) =>
-    new Set(pairs.map(([repo, map]) => `${repo}#${map}`));
+    new Set(pairs.map(([repo, map]) => workspaceDescription(repo, map)));
 
   test("the cache root holds every repo's board directory", () => {
     expect(boardCacheDir(HOME)).toBe("/Users/ann/.cache/cmux-wayfinder");
@@ -484,13 +485,14 @@ describe("board-file prune", () => {
     expect(planBoardPrune(HOME, files, new Set())).toEqual(files.slice().sort());
   });
 
-  test("only board files are candidates — other cache junk is left alone", () => {
-    const files = [
+  test("only board files are candidates — directories and other cache junk are left alone", () => {
+    const paths = [
+      `${boardCacheDir(HOME)}/acme-example`, // the per-repo directory itself
       `${boardCacheDir(HOME)}/acme-example/101.html.4242.tmp`,
       `${boardCacheDir(HOME)}/acme-example/notes.txt`,
       board("acme/example", 101),
     ];
-    expect(planBoardPrune(HOME, files, new Set())).toEqual([board("acme/example", 101)]);
+    expect(planBoardPrune(HOME, paths, new Set())).toEqual([board("acme/example", 101)]);
   });
 
   test("descriptions that aren't ours back no file (and so keep nothing alive)", () => {

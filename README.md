@@ -117,8 +117,9 @@ that closed and of repos that left `tracked.yaml`. A live map's board is never
 touched, and nothing else sharing that directory is a candidate.
 
 Pair it with `--dry-run` first (`bun src/sync.ts --prune --dry-run`) to see
-exactly what would close and what would be deleted. Because `--prune` can close the workspace you're
-sitting in, it may move your cmux selection — expected under prune only.
+exactly what would close and what would be deleted. Because `--prune` can close
+the workspace you're sitting in, it may move your cmux selection — expected
+under prune only.
 
 Known v1 limitations:
 - `cmux rpc workspace.group.create` leaves a stray empty anchor workspace in

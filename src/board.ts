@@ -205,7 +205,13 @@ export function boardPath(home: string, canonicalRepo: string, mapNumber: number
 
 /**
  * Decide which cache board files `--prune` should delete (ticket #11): every
- * `.html` file found under {@link boardCacheDir} that no desired map backs.
+ * `.html` file under {@link boardCacheDir} that no desired map backs.
+ *
+ * `existingPaths` is everything sync found under the cache root, unfiltered —
+ * picking the board files out of it is this function's job, so the rule lives
+ * in one tested place. Only `.html` is a candidate, so a crashed write's
+ * `…html.<pid>.tmp` leftover (and anything else sharing the directory) is never
+ * our business.
  *
  * `desiredDescriptions` is the same `owner/repo#map` set the workspace prune
  * takes (`planWorkspacePrune` in `plan.ts`) — sync fills it from every tracked
@@ -215,13 +221,11 @@ export function boardPath(home: string, canonicalRepo: string, mapNumber: number
  * repos: the `owner/repo` → `owner-repo` directory name is lossy, and comparing
  * generated paths cannot mistake one repo for another.
  *
- * Only `.html` is a candidate, so a crashed write's `…html.<pid>.tmp` leftover
- * (and anything else sharing the directory) is never our business. Output is
- * sorted so the run's log reads the same way twice.
+ * Output is sorted so the run's log reads the same way twice.
  */
 export function planBoardPrune(
   home: string,
-  existingFiles: string[],
+  existingPaths: string[],
   desiredDescriptions: Iterable<string>,
 ): string[] {
   const keep = new Set<string>();
@@ -229,7 +233,7 @@ export function planBoardPrune(
     const ref = parseWorkspaceDescription(description);
     if (ref) keep.add(boardPath(home, ref.repo, ref.mapNumber));
   }
-  return existingFiles.filter((f) => f.endsWith(".html") && !keep.has(f)).sort();
+  return existingPaths.filter((p) => p.endsWith(".html") && !keep.has(p)).sort();
 }
 
 /** `file://` URL for an absolute path, with each segment percent-escaped. */
