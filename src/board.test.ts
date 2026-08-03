@@ -118,6 +118,7 @@ describe("embedded payload", () => {
       body: "## Heading\n\nsome *markdown*",
       html_url: "https://github.com/acme/example/issues/7",
       lane: "inprogress",
+      type: "research",
     });
   });
 
@@ -139,6 +140,13 @@ describe("embedded payload", () => {
     // …and the rendered row shows it as text, not markup.
     expect(html).toContain("&lt;b&gt;bold&lt;/b&gt;");
     expect(html).not.toContain("<img");
+  });
+
+  test("carries the ticket type the modal badges, defaulting an unlabeled one to task", () => {
+    const tickets = [ticket(1), ticket(2, { labels: ["wayfinder:prototype", "ready-for-agent"] })];
+    const data = payloadOf(renderBoard(input(tickets)));
+    expect(data.tickets["1"].type).toBe("task");
+    expect(data.tickets["2"].type).toBe("prototype");
   });
 
   test("a body-less ticket round-trips as an empty body", () => {
@@ -177,7 +185,7 @@ describe("the page shell", () => {
 
   test("embeds the fallback reload timer", () => {
     const html = renderBoard(input([ticket(1)]));
-    expect(html).toMatch(/setInterval\(function \(\) \{[\s\S]*location\.reload\(\);[\s\S]*\}, 5000\)/);
+    expect(html).toMatch(/setInterval\(function \(\) \{[^}]*location\.reload\(\);[^}]*\}, 5000\)/);
   });
 
   test("requests no external resources (plain https anchors excepted)", () => {

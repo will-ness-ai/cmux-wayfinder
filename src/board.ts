@@ -17,7 +17,16 @@
  */
 
 import type { IssueState } from "./frontier.ts";
-import { DONE, lanesTabTitle, mapLabel, readinessOf, TYPE_EMOJI, typeEmojiOf } from "./plan.ts";
+import {
+  DONE,
+  lanesTabTitle,
+  mapLabel,
+  readinessOf,
+  ticketTypeOf,
+  TYPE_EMOJI,
+  typeEmojiOf,
+  type TicketType,
+} from "./plan.ts";
 
 // ---------- inputs ----------
 
@@ -144,6 +153,8 @@ export interface PayloadTicket {
   html_url: string;
   /** The generator's lane decision, so the page never re-derives it. */
   lane: Lane;
+  /** Likewise its ticket type — the modal badges and names it, never parses it. */
+  type: TicketType;
 }
 
 export interface BoardPayload {
@@ -169,6 +180,7 @@ export function boardPayload(input: BoardInput): BoardPayload {
       body: t.body ?? "",
       html_url: t.url,
       lane: laneOf(t),
+      type: ticketTypeOf(t.labels),
     };
   }
   const edges = inMapEdges(input.tickets, input.edges);
@@ -251,7 +263,7 @@ export const MD_SOURCE = `function md(src) {
         .replace(/\\*\\*([^*]+)\\*\\*/g, "<b>$1</b>")
         .replace(/(^|[^*])\\*([^*\\n]+)\\*/g, "$1<i>$2</i>")
         .replace(/\\[([^\\]]+)\\]\\((https?:[^)\\s]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-        .replace(/(^|\\s)(#(\\d{1,4}))\\b/g, "$1<b>$2</b>");
+        .replace(/(^|\\s)(#\\d{1,4})\\b/g, "$1<b>$2</b>");
     }
     var lines = String(src).replace(/\\r/g, "").split("\\n");
     var out = "", inList = false, inPre = false, pre = [];
@@ -441,7 +453,6 @@ function pageScript(mapNumber: number): string {
   var DATA = JSON.parse(document.getElementById("board-data").textContent);
   var LANE_NAME = ${embeddedJson(LANE_NAME)};
   var TYPE_EMOJI = ${embeddedJson(TYPE_EMOJI)};
-  var TYPES = Object.keys(TYPE_EMOJI);
   var stage = document.getElementById("stage");
   var table = stage.querySelector("table");
   var scrim = document.getElementById("scrim");
@@ -525,26 +536,18 @@ function pageScript(mapNumber: number): string {
 
   // ---- the ticket modal: read a body without leaving cmux ----
 
-  /** The ticket's \`wayfinder:<type>\` label; an unlabeled ticket is a task. */
-  function typeOf(labels) {
-    for (var i = 0; i < labels.length; i++) {
-      var t = labels[i].replace(/^wayfinder:/, "");
-      if (t !== labels[i] && TYPES.indexOf(t) !== -1) return t;
-    }
-    return "task";
-  }
-
   function modalOpen() { return scrim.classList.contains("open"); }
   function closeModal() { scrim.classList.remove("open"); }
 
   function openModal(n) {
     var t = DATA.tickets[n];
     if (!t) return;
-    var type = typeOf(t.labels);
     document.getElementById("m-title").innerHTML =
-      TYPE_EMOJI[type] + ' <span class="m-num">#' + t.number + "</span> " + esc(t.title);
-    var meta = ['<span class="lane-chip">' + esc(LANE_NAME[t.lane]) + "</span>",
-                "<span>" + esc(type) + "</span>"];
+      TYPE_EMOJI[t.type] + ' <span class="m-num">#' + t.number + "</span> " + esc(t.title);
+    var meta = [
+      '<span class="lane-chip">' + esc(LANE_NAME[t.lane]) + "</span>",
+      "<span>" + esc(t.type) + "</span>",
+    ];
     if (t.assignees.length) meta.push("<span>@" + esc(t.assignees[0]) + "</span>");
     // In-map blockers only — the same edges the row's chips are drawn from.
     var blockers = DATA.edges[n] || [];
