@@ -5,7 +5,8 @@
  *   tracked.yaml → per repo: resolve → open maps + frontier → reconcile cmux:
  *     one group per repo, one workspace per open map, one tab per open+unblocked
  *     sub-issue (booting `claude --worktree …`), ✓-marks for closed tickets and
- *     for a whole map once all its sub-issues are done.
+ *     for a whole map once all its sub-issues are done, plus two enforced
+ *     browser tabs — the map issue and the generated lanes board (#8).
  *
  * Default path is additive + rename-only: never closes a workspace/tab, never
  * moves focus. `--prune` additionally closes done/stale ticket tabs and the
@@ -17,14 +18,20 @@
  *   bun src/sync.ts [--config tracked.yaml] [--dry-run] [--prune] [--watch [sec]]
  */
 
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname } from "node:path";
+
 import { sh } from "./proc.ts";
 import { loadTracked, type TrackedRepo } from "./config.ts";
 import { readFrontierFor, resolveRepo, type WayfinderMap } from "./frontier.ts";
 import * as cmux from "./cmux.ts";
+import { boardPath, fileUrl, formatGeneratedAt, renderBoard } from "./board.ts";
 import {
   groupName,
   isManagedWorkspaceTitle,
   isMapComplete,
+  lanesTabTitle,
   mapTabTitle,
   parseManagedTabTitle,
   planTabs,
@@ -140,11 +147,27 @@ async function syncMap(ctx: {
   }
 
   // Enforced: every map workspace has a browser tab open to the map issue,
-  // recreated if the user closed it. Runs before the frontier-tab early-return.
-  await ensureMapTab(ws, map, opts, log);
+  // recreated if the user closed it.
+  await ensureBrowserTab({ ws, title: mapTabTitle(map.number), url: map.url, index: 0, opts, log });
 
-  // Reconcile tabs. Without a live workspace (dry-run, uncreated) there are no
-  // existing tabs, so the plan shows the full frontier as creates.
+  await reconcileTabs({ ws, map, title, opts, log });
+
+  // The lanes board goes last: it renders the state the pass just reconciled.
+  await syncBoard({ canonical, map, ws, opts, log });
+}
+
+/** Reconcile a workspace's managed ticket tabs against the map's frontier. */
+async function reconcileTabs(ctx: {
+  ws: cmux.Workspace | undefined;
+  map: WayfinderMap;
+  /** The workspace's title — for the log lines only. */
+  title: string;
+  opts: Options;
+  log: Logger;
+}) {
+  const { ws, map, title, opts, log } = ctx;
+  // Without a live workspace (dry-run, uncreated) there are no existing tabs,
+  // so the plan shows the full frontier as creates.
   const existing: Tab[] = ws ? await cmux.listSurfaces(ws.id) : [];
   const plan = planTabs(existing, map, { prune: opts.prune });
 
@@ -194,29 +217,90 @@ async function syncMap(ctx: {
 }
 
 /**
- * Ensure the workspace has a browser tab open to the map issue. Unlike the
- * default shell tab, this one is *enforced*: if no browser tab titled
- * `map #<n>` exists (the user closed it), recreate it and pin it leftmost. A
- * present one is left alone — its position and current URL are the user's.
+ * Ensure the workspace has an *enforced* browser tab titled `title`: if none
+ * exists (the user closed it), create it open to `url` and pin it at `index`.
+ * A present one is left alone — its position and current URL are the user's.
+ * Matching on title + browser type means a pre-existing tab is adopted without
+ * any stored state. Returns the tab's surface when we can see one (undefined in
+ * a dry run, or before the workspace itself exists).
+ *
+ * Both enforced tabs go through here: the map issue pinned leftmost and the
+ * lanes board directly right of it.
  */
-async function ensureMapTab(
-  ws: cmux.Workspace | undefined,
-  map: WayfinderMap,
-  opts: Options,
-  log: Logger,
-) {
-  const title = mapTabTitle(map.number);
+async function ensureBrowserTab(ctx: {
+  ws: cmux.Workspace | undefined;
+  title: string;
+  url: string;
+  index: number;
+  opts: Options;
+  log: Logger;
+}): Promise<cmux.Surface | undefined> {
+  const { ws, title, url, index, opts, log } = ctx;
   const surfaces = ws ? await cmux.listSurfaces(ws.id) : [];
-  if (surfaces.some((s) => s.type === "browser" && s.title === title)) return;
+  const existing = surfaces.find((s) => s.type === "browser" && s.title === title);
+  if (existing) return existing;
 
-  log.act(`create browser tab "${title}" → ${map.url}`);
-  if (opts.dryRun || !ws) return;
-  const sid = await cmux.createBrowserSurface(ws.id, map.url);
+  log.act(`create browser tab "${title}" → ${url}`);
+  if (opts.dryRun || !ws) return undefined;
+  const sid = await cmux.createBrowserSurface(ws.id, url);
   await cmux.renameTab(sid, title);
-  await cmux.settle(async () =>
+  const created = await cmux.settle(async () =>
     (await cmux.listSurfaces(ws.id)).find((s) => s.id === sid && s.title === title),
   );
-  await cmux.reorderTab(ws.id, sid, 0); // map tab sits leftmost
+  await cmux.reorderTab(ws.id, sid, index);
+  return created;
+}
+
+/**
+ * The lanes board: generate the map's board HTML, write it to the per-repo
+ * cache, ensure the enforced `lanes #<n>` tab right of the map tab, and reload
+ * it. Order matters — a tab created before its file exists shows the raw URL as
+ * its title until something reloads it, so the write goes first (research #3).
+ *
+ * The reload is the primary refresh path; the page's own ~5s timer covers a
+ * skipped or failed rpc.
+ */
+async function syncBoard(ctx: {
+  canonical: string;
+  map: WayfinderMap;
+  ws: cmux.Workspace | undefined;
+  opts: Options;
+  log: Logger;
+}) {
+  const { canonical, map, ws, opts, log } = ctx;
+  const path = boardPath(homedir(), canonical, map.number);
+  const html = renderBoard({
+    map: { number: map.number, title: map.title, url: map.url },
+    tickets: map.subIssues,
+    edges: {},
+    generatedAt: formatGeneratedAt(new Date()),
+  });
+
+  log.act(`write board ${path} (${map.subIssues.length} ticket(s))`);
+  if (!opts.dryRun) await writeAtomic(path, html);
+
+  const title = lanesTabTitle(map.number);
+  const surface = await ensureBrowserTab({
+    ws,
+    title,
+    url: fileUrl(path),
+    index: 1, // directly right of the map tab
+    opts,
+    log,
+  });
+
+  // A dry run has no surface to reload unless the tab already exists, but the
+  // reload is still part of the plan we print.
+  if (opts.dryRun || surface) log.act(`reload browser tab "${title}"`);
+  if (!opts.dryRun && surface) await cmux.reloadBrowser(surface.id);
+}
+
+/** Write a file via temp + rename, creating its parent directory. */
+async function writeAtomic(path: string, content: string) {
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  await writeFile(tmp, content, "utf8");
+  await rename(tmp, path);
 }
 
 /**

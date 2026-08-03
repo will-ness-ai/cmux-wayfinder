@@ -4,6 +4,7 @@ import {
   groupName,
   isManagedWorkspaceTitle,
   isMapComplete,
+  lanesTabTitle,
   launchCommand,
   mapLabel,
   mapTabTitle,
@@ -95,6 +96,12 @@ describe("formatters", () => {
   test("map tab title is a marker the numbered matcher ignores", () => {
     expect(mapTabTitle(101)).toBe("map #101");
     expect(parseManagedTabTitle(mapTabTitle(101))).toBeNull(); // not a managed ticket tab
+  });
+
+  test("lanes tab title is a marker too — tab reconciliation never touches it", () => {
+    expect(lanesTabTitle(101)).toBe("lanes #101");
+    expect(parseManagedTabTitle(lanesTabTitle(101))).toBeNull();
+    expect(lanesTabTitle(101)).not.toBe(mapTabTitle(101));
   });
 });
 

@@ -28,6 +28,13 @@ Reads `tracked.yaml` (list of tracked repos + local checkout paths), discovers o
   the sidebar reads by name while sync still matches on the stable id
 - one **browser tab** per workspace (title `map #<map#>`), open to the map
   issue — *enforced*: recreated (pinned leftmost) if you close it
+- a second **browser tab** right of it (title `lanes #<map#>`) — the **lanes
+  board**: a generated, self-contained `file://` page showing the map's
+  sub-issues as a sprint-lane ledger (In progress → Frontier → Blocked →
+  Resolved). Also *enforced*. Each pass regenerates the file under
+  `~/.cache/cmux-wayfinder/<owner>-<repo>/<map#>.html` and reloads the tab; the
+  page also self-reloads every ~5s, so it never sits stale. It makes **zero
+  network calls**, so it renders for private repos too
 - one **tab** per open+unblocked sub-issue (title `[XY]<ticket#>`): launches
   `claude --worktree wayfinder/<map#>/<ticket#>`, waits for the TUI, then types
   `/wayfinder map #<map#> work on ticket #<ticket#>` into the input box and
