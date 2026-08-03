@@ -8,6 +8,7 @@ import {
   partitionLanes,
   renderBoard,
   type BoardInput,
+  type BoardPayload,
   type BoardTicket,
 } from "./board.ts";
 import { lanesTabTitle } from "./plan.ts";
@@ -40,10 +41,10 @@ function input(tickets: BoardTicket[], over: Partial<BoardInput> = {}): BoardInp
 }
 
 /** Pull the embedded payload back out of the generated page. */
-function payloadOf(html: string): any {
+function payloadOf(html: string): BoardPayload {
   const m = /<script id="board-data" type="application\/json">([\s\S]*?)<\/script>/.exec(html);
-  expect(m).not.toBeNull();
-  return JSON.parse(m![1]!);
+  if (!m) throw new Error("generated page carries no board-data payload");
+  return JSON.parse(m[1]!);
 }
 
 describe("lane predicates", () => {

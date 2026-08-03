@@ -47,8 +47,8 @@ export interface BoardMap {
 export interface BoardInput {
   map: BoardMap;
   tickets: BoardTicket[];
-  /** Ticket number → its in-map blocker numbers (ticket #9 fills this). */
-  edges: Record<number | string, number[]>;
+  /** Keyed by ticket number → its in-map blocker numbers (ticket #9 fills this). */
+  edges: Record<string, number[]>;
   /** Human-facing freshness stamp, e.g. `Aug 2 at 1:00 PM`. */
   generatedAt: string;
 }
@@ -138,14 +138,13 @@ export function boardPayload(input: BoardInput): BoardPayload {
 
 // ---------- cache file location ----------
 
-/** Per-repo cache directory holding one board file per map. */
-export function boardDir(home: string, canonicalRepo: string): string {
-  return `${home}/.cache/cmux-wayfinder/${canonicalRepo.replace(/\//g, "-")}`;
-}
-
-/** `~/.cache/cmux-wayfinder/<owner>-<repo>/<map>.html` — outside every checkout. */
+/**
+ * `~/.cache/cmux-wayfinder/<owner>-<repo>/<map>.html` — one file per map, under
+ * a per-repo directory, outside every checkout.
+ */
 export function boardPath(home: string, canonicalRepo: string, mapNumber: number): string {
-  return `${boardDir(home, canonicalRepo)}/${mapNumber}.html`;
+  const dir = `${home}/.cache/cmux-wayfinder/${canonicalRepo.replace(/\//g, "-")}`;
+  return `${dir}/${mapNumber}.html`;
 }
 
 /** `file://` URL for an absolute path, with each segment percent-escaped. */
@@ -165,6 +164,10 @@ export function formatGeneratedAt(at: Date): string {
 /** How often the page reloads itself when an rpc reload is missed or fails. */
 export const RELOAD_MS = 5000;
 
+/** Lane-section chevrons — the generated markup and the page script share them. */
+const CHEV_COLLAPSED = "▸";
+const CHEV_OPEN = "▾";
+
 function esc(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -182,11 +185,14 @@ function embeddedJson(value: unknown): string {
 }
 
 function statStrip(lanes: Record<Lane, BoardTicket[]>): string {
-  return `<div class="strip">${LANE_ORDER.map(
-    (l) =>
-      `<div class="stat s-${l}${lanes[l].length ? "" : " s-zero"}">` +
-      `<b>${lanes[l].length}</b><span>${LANE_NAME[l]}</span></div>`,
-  ).join("")}</div>`;
+  const cards = LANE_ORDER.map((lane) => {
+    const count = lanes[lane].length;
+    return (
+      `<div class="stat s-${lane}${count ? "" : " s-zero"}">` +
+      `<b>${count}</b><span>${LANE_NAME[lane]}</span></div>`
+    );
+  }).join("");
+  return `<div class="strip">${cards}</div>`;
 }
 
 function row(t: BoardTicket, lane: Lane, collapsed: boolean): string {
@@ -208,7 +214,7 @@ function laneSection(lane: Lane, tickets: BoardTicket[]): string {
   const collapsed = lane === "resolved";
   return (
     `<tr class="sec sec-${lane}" data-sec="${lane}"><td colspan="4">` +
-    `<span class="chev">${collapsed ? "▸" : "▾"}</span>${LANE_NAME[lane]}` +
+    `<span class="chev">${collapsed ? CHEV_COLLAPSED : CHEV_OPEN}</span>${LANE_NAME[lane]}` +
     `<span class="cnt">${tickets.length}</span></td></tr>` +
     tickets.map((t) => row(t, lane, collapsed)).join("")
   );
@@ -225,6 +231,9 @@ export function renderBoard(input: BoardInput): string {
   const sections = LANE_ORDER.filter((l) => lanes[l].length > 0)
     .map((l) => laneSection(l, lanes[l]))
     .join("");
+  const mapLink =
+    `<a href="${esc(input.map.url)}" target="_blank" rel="noopener">` +
+    `<b>lanes</b> · ${esc(mapLabel(input.map.title, input.map.number))} ↗</a>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -238,7 +247,7 @@ ${STYLES}
 </head>
 <body>
 <div id="stage"><div class="v-classic">
-<div class="board-title"><a href="${esc(input.map.url)}" target="_blank" rel="noopener"><b>lanes</b> · ${esc(mapLabel(input.map.title, input.map.number))} ↗</a></div>
+<div class="board-title">${mapLink}</div>
 <div class="board-sub">${counts} · generated ${esc(input.generatedAt)}</div>
 ${statStrip(lanes)}
 <div class="grid-wrap"><table>
@@ -277,7 +286,7 @@ function pageScript(mapNumber: number): string {
     var rows = rowsOf(lane);
     for (var i = 0; i < rows.length; i++) rows[i].classList.toggle("hidden-lane", collapsed);
     var chev = document.querySelector('tr.sec[data-sec="' + lane + '"] .chev');
-    if (chev) chev.textContent = collapsed ? "\\u25B8" : "\\u25BE";
+    if (chev) chev.textContent = collapsed ? "${CHEV_COLLAPSED}" : "${CHEV_OPEN}";
   }
   function isCollapsed(lane) {
     var rows = rowsOf(lane);
