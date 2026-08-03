@@ -1,6 +1,9 @@
 import { expect, test, describe } from "bun:test";
-import type { SubIssue, WayfinderMap } from "./frontier.ts";
+import type { SubIssue, WayfinderMap } from "./issues.ts";
 import {
+  boardCacheDir,
+  boardPath,
+  fileUrl,
   groupName,
   isManagedWorkspaceTitle,
   isMapComplete,
@@ -10,6 +13,7 @@ import {
   mapTabTitle,
   parseManagedTabTitle,
   parseWorkspaceDescription,
+  planBoardPrune,
   planTabs,
   planWorkspacePrune,
   READY_FOR_AGENT,
@@ -466,5 +470,79 @@ describe("planWorkspacePrune", () => {
     const groups = [grp("example wayfinder", ["w1"])];
     const desired = new Set(["acme/example#101"]);
     expect(planWorkspacePrune(wss, groups, desired)).toEqual([]);
+  });
+});
+
+describe("board cache file location", () => {
+  test("one file per map under a per-repo directory", () => {
+    expect(boardPath("/Users/ann", "acme/example", 101)).toBe(
+      "/Users/ann/.cache/cmux-wayfinder/acme-example/101.html",
+    );
+  });
+
+  test("file urls escape path segments", () => {
+    expect(fileUrl("/Users/ann/.cache/cmux-wayfinder/acme-example/101.html")).toBe(
+      "file:///Users/ann/.cache/cmux-wayfinder/acme-example/101.html",
+    );
+    expect(fileUrl("/Users/an n/x.html")).toBe("file:///Users/an%20n/x.html");
+  });
+});
+
+describe("planBoardPrune", () => {
+  const HOME = "/Users/ann";
+  const board = (repo: string, map: number) => boardPath(HOME, repo, map);
+  // Built with the real producer, so the test keeps pace with the description format.
+  const desired = (...pairs: [string, number][]) =>
+    new Set(pairs.map(([repo, map]) => workspaceDescription(repo, map)));
+
+  test("the cache root holds every repo's board directory", () => {
+    expect(boardCacheDir(HOME)).toBe("/Users/ann/.cache/cmux-wayfinder");
+    expect(board("acme/example", 101).startsWith(`${boardCacheDir(HOME)}/`)).toBe(true);
+  });
+
+  test("deletes the board of a map that is no longer desired", () => {
+    const files = [board("acme/example", 101), board("acme/example", 102)];
+    expect(planBoardPrune(HOME, files, desired(["acme/example", 101]))).toEqual([
+      board("acme/example", 102),
+    ]);
+  });
+
+  test("deletes the boards of a repo that is no longer tracked", () => {
+    const files = [board("acme/example", 101), board("other/repo", 7)];
+    expect(planBoardPrune(HOME, files, desired(["acme/example", 101]))).toEqual([
+      board("other/repo", 7),
+    ]);
+  });
+
+  test("keeps every desired map's board, deletes nothing else when all are backed", () => {
+    const files = [board("acme/example", 101), board("other/repo", 7)];
+    expect(planBoardPrune(HOME, files, desired(["acme/example", 101], ["other/repo", 7]))).toEqual(
+      [],
+    );
+  });
+
+  test("no desired maps at all means every board file goes", () => {
+    const files = [board("acme/example", 101), board("other/repo", 7)];
+    expect(planBoardPrune(HOME, files, new Set())).toEqual(files.slice().sort());
+  });
+
+  test("only board files are candidates — directories and other cache junk are left alone", () => {
+    const paths = [
+      `${boardCacheDir(HOME)}/acme-example`, // the per-repo directory itself
+      `${boardCacheDir(HOME)}/acme-example/101.html.4242.tmp`,
+      `${boardCacheDir(HOME)}/acme-example/notes.txt`,
+      board("acme/example", 101),
+    ];
+    expect(planBoardPrune(HOME, paths, new Set())).toEqual([board("acme/example", 101)]);
+  });
+
+  test("descriptions that aren't ours back no file (and so keep nothing alive)", () => {
+    const files = [board("acme/example", 101)];
+    expect(planBoardPrune(HOME, files, new Set(["not-a-description"]))).toEqual(files);
+  });
+
+  test("deletions come out in a stable order", () => {
+    const files = [board("b/two", 2), board("a/one", 1)];
+    expect(planBoardPrune(HOME, files, new Set())).toEqual([board("a/one", 1), board("b/two", 2)]);
   });
 });

@@ -16,12 +16,11 @@
  * tab title, so the page never touches `document.title`.
  */
 
-import type { IssueState } from "./frontier.ts";
+import type { EdgeMap, IssueState } from "./issues.ts";
 import {
   DONE,
   lanesTabTitle,
   mapLabel,
-  parseWorkspaceDescription,
   readinessOf,
   ticketTypeOf,
   TYPE_EMOJI,
@@ -45,7 +44,7 @@ export interface BoardTicket {
   labels: string[];
   url: string;
   /** Markdown body, carried into the payload for the modal (ticket #10). */
-  body?: string;
+  body: string;
 }
 
 export interface BoardMap {
@@ -58,11 +57,11 @@ export interface BoardInput {
   map: BoardMap;
   tickets: BoardTicket[];
   /**
-   * Keyed by ticket number → its blocker numbers, open or closed, as GitHub
-   * reports them. Refs to issues outside the map are dropped here (see
-   * {@link inMapEdges}) — the board only draws edges it can point at.
+   * Each ticket's blocker numbers, open or closed, as GitHub reports them.
+   * Refs to issues outside the map are dropped here (see {@link inMapEdges}) —
+   * the board only draws edges it can point at.
    */
-  edges: Record<string, number[]>;
+  edges: EdgeMap;
   /** Human-facing freshness stamp, e.g. `Aug 2 at 1:00 PM`. */
   generatedAt: string;
 }
@@ -115,12 +114,9 @@ export function partitionLanes(tickets: BoardTicket[]): Record<Lane, BoardTicket
  * count, so a ticket can sit in Blocked with no chip at all — that is the honest
  * rendering of "blocked by something you cannot see from here".
  */
-export function inMapEdges(
-  tickets: BoardTicket[],
-  edges: Record<string, number[]>,
-): Record<string, number[]> {
+export function inMapEdges(tickets: BoardTicket[], edges: EdgeMap): EdgeMap {
   const inMap = new Set(tickets.map((t) => t.number));
-  const kept: Record<string, number[]> = {};
+  const kept: EdgeMap = {};
   for (const [n, blockers] of Object.entries(edges)) {
     if (!inMap.has(Number(n))) continue;
     kept[n] = blockers.filter((b) => inMap.has(b));
@@ -133,8 +129,8 @@ export function inMapEdges(
  * Never fetched — GitHub's dependents listing would cost another call per
  * ticket, and inverting what we already have is exact.
  */
-export function dependentsOf(edges: Record<string, number[]>): Record<string, number[]> {
-  const deps: Record<string, number[]> = {};
+export function dependentsOf(edges: EdgeMap): EdgeMap {
+  const deps: EdgeMap = {};
   for (const [n, blockers] of Object.entries(edges)) {
     for (const b of blockers) (deps[String(b)] ??= []).push(Number(n));
   }
@@ -161,7 +157,7 @@ export interface PayloadTicket {
 export interface BoardPayload {
   map: BoardMap;
   tickets: Record<string, PayloadTicket>;
-  edges: Record<string, number[]>;
+  edges: EdgeMap;
   generatedAt: string;
 }
 
@@ -178,7 +174,7 @@ export function boardPayload(input: BoardInput): BoardPayload {
       state: t.state,
       assignees: t.assignees,
       labels: t.labels,
-      body: t.body ?? "",
+      body: t.body,
       html_url: t.url,
       lane: laneOf(t),
       type: ticketTypeOf(t.labels),
@@ -188,58 +184,7 @@ export function boardPayload(input: BoardInput): BoardPayload {
   return { map: { ...input.map }, tickets, edges, generatedAt: input.generatedAt };
 }
 
-// ---------- cache file location ----------
-
-/** The cache root every repo's board directory lives under. */
-export function boardCacheDir(home: string): string {
-  return `${home}/.cache/cmux-wayfinder`;
-}
-
-/**
- * `~/.cache/cmux-wayfinder/<owner>-<repo>/<map>.html` — one file per map, under
- * a per-repo directory, outside every checkout.
- */
-export function boardPath(home: string, canonicalRepo: string, mapNumber: number): string {
-  return `${boardCacheDir(home)}/${canonicalRepo.replace(/\//g, "-")}/${mapNumber}.html`;
-}
-
-/**
- * Decide which cache board files `--prune` should delete (ticket #11): every
- * `.html` file under {@link boardCacheDir} that no desired map backs.
- *
- * `existingPaths` is everything sync found under the cache root, unfiltered —
- * picking the board files out of it is this function's job, so the rule lives
- * in one tested place. Only `.html` is a candidate, so a crashed write's
- * `…html.<pid>.tmp` leftover (and anything else sharing the directory) is never
- * our business.
- *
- * `desiredDescriptions` is the same `owner/repo#map` set the workspace prune
- * takes (`planWorkspacePrune` in `plan.ts`) — sync fills it from every tracked
- * repo's *open* maps during the additive pass, so "not desired" covers both a
- * map that closed and a repo dropped from `tracked.yaml`. Each one is mapped
- * forward through {@link boardPath} rather than parsing filenames back into
- * repos: the `owner/repo` → `owner-repo` directory name is lossy, and comparing
- * generated paths cannot mistake one repo for another.
- *
- * Output is sorted so the run's log reads the same way twice.
- */
-export function planBoardPrune(
-  home: string,
-  existingPaths: string[],
-  desiredDescriptions: Iterable<string>,
-): string[] {
-  const keep = new Set<string>();
-  for (const description of desiredDescriptions) {
-    const ref = parseWorkspaceDescription(description);
-    if (ref) keep.add(boardPath(home, ref.repo, ref.mapNumber));
-  }
-  return existingPaths.filter((p) => p.endsWith(".html") && !keep.has(p)).sort();
-}
-
-/** `file://` URL for an absolute path, with each segment percent-escaped. */
-export function fileUrl(absPath: string): string {
-  return `file://${absPath.split("/").map(encodeURIComponent).join("/")}`;
-}
+// ---------- freshness stamp ----------
 
 /** The board's freshness stamp, in the reader's locale — e.g. `Aug 2 at 1:00 PM`. */
 export function formatGeneratedAt(at: Date): string {
@@ -366,30 +311,31 @@ function statStrip(lanes: Record<Lane, BoardTicket[]>): string {
 }
 
 /**
- * The edge structure a row needs: who it waits on (rendered as chips, each
- * red or grey-struck by its blocker's state) and who it unblocks (carried as
- * an attribute for the page's spotlight — the chips already carry the other
- * direction, so neither list is stored twice).
+ * What rendering a row needs to know about the dependency structure: who it
+ * waits on (rendered as chips, each red or grey-struck by its blocker's state,
+ * hence the state lookup) and who it unblocks (carried as an attribute for the
+ * page's spotlight — the chips already carry the other direction, so neither
+ * list is stored twice).
  */
-interface Edges {
-  blockers: Record<string, number[]>;
-  dependents: Record<string, number[]>;
+interface EdgeContext {
+  blockers: EdgeMap;
+  dependents: EdgeMap;
   stateOf: (n: number) => IssueState;
 }
 
-function waitCell(t: BoardTicket, edges: Edges): string {
-  const chips = (edges.blockers[String(t.number)] ?? []).map((b) => {
-    const historical = edges.stateOf(b) === "closed";
+function waitCell(t: BoardTicket, ctx: EdgeContext): string {
+  const chips = (ctx.blockers[String(t.number)] ?? []).map((b) => {
+    const historical = ctx.stateOf(b) === "closed";
     return `<span class="wref${historical ? " hist" : ""}" data-ref="${b}">#${b}</span>`;
   });
   return `<td class="wait">${chips.join("")}</td>`;
 }
 
-function row(t: BoardTicket, lane: Lane, collapsed: boolean, edges: Edges): string {
+function row(t: BoardTicket, lane: Lane, collapsed: boolean, ctx: EdgeContext): string {
   const done = t.state === "closed";
   const cls = `t${done ? " done" : ""}${collapsed ? " hidden-lane" : ""}`;
   const who = !done && t.assignees.length ? `@${esc(t.assignees[0]!)}` : "";
-  const dependents = edges.dependents[String(t.number)] ?? [];
+  const dependents = ctx.dependents[String(t.number)] ?? [];
   const dep = dependents.length ? ` data-dep="${dependents.join(",")}"` : "";
   return (
     `<tr class="${cls}" data-t="${t.number}" data-lane="${lane}"${dep}>` +
@@ -397,19 +343,19 @@ function row(t: BoardTicket, lane: Lane, collapsed: boolean, edges: Edges): stri
     `<td class="emo">${typeEmojiOf(t.labels)}${done ? DONE : readinessOf(t.labels)}</td>` +
     `<td class="title">${esc(t.title)}</td>` +
     `<td class="who">${who}</td>` +
-    waitCell(t, edges) +
+    waitCell(t, ctx) +
     `</tr>`
   );
 }
 
-function laneSection(lane: Lane, tickets: BoardTicket[], edges: Edges): string {
+function laneSection(lane: Lane, tickets: BoardTicket[], ctx: EdgeContext): string {
   // Resolved starts collapsed so finished work never crowds the live work.
   const collapsed = lane === "resolved";
   return (
     `<tr class="sec sec-${lane}" data-sec="${lane}"><td colspan="5">` +
     `<span class="chev">${collapsed ? CHEV_COLLAPSED : CHEV_OPEN}</span>${LANE_NAME[lane]}` +
     `<span class="cnt">${tickets.length}</span></td></tr>` +
-    tickets.map((t) => row(t, lane, collapsed, edges)).join("")
+    tickets.map((t) => row(t, lane, collapsed, ctx)).join("")
   );
 }
 
@@ -429,7 +375,7 @@ export function renderBoard(input: BoardInput): string {
   ).join(" · ");
   const blockers = inMapEdges(input.tickets, input.edges);
   const byNumber = new Map(input.tickets.map((t) => [t.number, t]));
-  const edges: Edges = {
+  const ctx: EdgeContext = {
     blockers,
     dependents: dependentsOf(blockers),
     // Every ref survived inMapEdges, so every lookup here hits.
@@ -437,7 +383,7 @@ export function renderBoard(input: BoardInput): string {
   };
   // Empty lanes are hidden from the table (the strip still shows their zero).
   const sections = LANE_ORDER.filter((l) => lanes[l].length > 0)
-    .map((l) => laneSection(l, lanes[l], edges))
+    .map((l) => laneSection(l, lanes[l], ctx))
     .join("");
   const mapLink =
     `<a href="${esc(input.map.url)}" target="_blank" rel="noopener">` +

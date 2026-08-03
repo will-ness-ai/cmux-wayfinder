@@ -13,7 +13,7 @@
  * which workspaces (dead maps + stray group anchors) to close.
  */
 
-import type { SubIssue, WayfinderMap } from "./frontier.ts";
+import type { SubIssue, WayfinderMap } from "./issues.ts";
 
 // ---------- identity keys & formatters ----------
 
@@ -474,4 +474,57 @@ export function planWorkspacePrune(
     }
   }
   return closes;
+}
+
+// ---------- board cache files (pure) ----------
+
+/** The cache root every repo's board directory lives under. */
+export function boardCacheDir(home: string): string {
+  return `${home}/.cache/cmux-wayfinder`;
+}
+
+/**
+ * `~/.cache/cmux-wayfinder/<owner>-<repo>/<map>.html` — one file per map, under
+ * a per-repo directory, outside every checkout.
+ */
+export function boardPath(home: string, canonicalRepo: string, mapNumber: number): string {
+  return `${boardCacheDir(home)}/${canonicalRepo.replace(/\//g, "-")}/${mapNumber}.html`;
+}
+
+/** `file://` URL for an absolute path, with each segment percent-escaped. */
+export function fileUrl(absPath: string): string {
+  return `file://${absPath.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/**
+ * Decide which cache board files `--prune` should delete (ticket #11): every
+ * `.html` file under {@link boardCacheDir} that no desired map backs.
+ *
+ * `existingPaths` is everything sync found under the cache root, unfiltered —
+ * picking the board files out of it is this function's job, so the rule lives
+ * in one tested place. Only `.html` is a candidate, so a crashed write's
+ * `…html.<pid>.tmp` leftover (and anything else sharing the directory) is never
+ * our business.
+ *
+ * `desiredDescriptions` is the same `owner/repo#map` set {@link planWorkspacePrune}
+ * takes — sync fills it from every tracked repo's *open* maps during the
+ * additive pass, so "not desired" covers both a map that closed and a repo
+ * dropped from `tracked.yaml`. Each one is mapped forward through
+ * {@link boardPath} rather than parsing filenames back into repos: the
+ * `owner/repo` → `owner-repo` directory name is lossy, and comparing generated
+ * paths cannot mistake one repo for another.
+ *
+ * Output is sorted so the run's log reads the same way twice.
+ */
+export function planBoardPrune(
+  home: string,
+  existingPaths: string[],
+  desiredDescriptions: Iterable<string>,
+): string[] {
+  const keep = new Set<string>();
+  for (const description of desiredDescriptions) {
+    const ref = parseWorkspaceDescription(description);
+    if (ref) keep.add(boardPath(home, ref.repo, ref.mapNumber));
+  }
+  return existingPaths.filter((p) => p.endsWith(".html") && !keep.has(p)).sort();
 }

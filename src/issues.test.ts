@@ -1,8 +1,8 @@
 import { expect, test, describe } from "bun:test";
-import { blockedByEdges, toBlockerNumbers, toSubIssue, type SubIssue } from "./frontier.ts";
+import { blockedByEdges, toBlockerNumbers, toSubIssue, type RawSubIssue } from "./issues.ts";
 
 /** A raw element of GitHub's `sub_issues` listing, trimmed to what we read. */
-function raw(number: number, over: Record<string, unknown> = {}) {
+function raw(number: number, over: Partial<RawSubIssue> = {}): RawSubIssue {
   return {
     number,
     title: `Ticket ${number}`,
@@ -71,10 +71,10 @@ describe("toBlockerNumbers", () => {
 describe("blockedByEdges", () => {
   test("keys every sub-issue to its blocker numbers", () => {
     const subs = [
-      { number: 1, blockers: [] },
-      { number: 2, blockers: [1] },
-      { number: 3, blockers: [1, 2] },
-    ] as SubIssue[];
+      toSubIssue(raw(1), []),
+      toSubIssue(raw(2), [1]),
+      toSubIssue(raw(3), [1, 2]),
+    ];
     expect(blockedByEdges(subs)).toEqual({ "1": [], "2": [1], "3": [1, 2] });
   });
 });

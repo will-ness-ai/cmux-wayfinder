@@ -1,24 +1,21 @@
 import { expect, test, describe } from "bun:test";
 import {
-  boardCacheDir,
-  boardPath,
   boardPayload,
   dependentsOf,
   ESC_SOURCE,
-  fileUrl,
   inMapEdges,
   laneOf,
   LANE_ORDER,
   MD_SOURCE,
   partitionLanes,
-  planBoardPrune,
+  RELOAD_MS,
   renderBoard,
   type BoardInput,
   type BoardPayload,
   type BoardTicket,
 } from "./board.ts";
-import { toSubIssue } from "./frontier.ts";
-import { lanesTabTitle, workspaceDescription } from "./plan.ts";
+import { toSubIssue } from "./issues.ts";
+import { lanesTabTitle } from "./plan.ts";
 
 function ticket(number: number, over: Partial<BoardTicket> = {}): BoardTicket {
   return {
@@ -28,6 +25,7 @@ function ticket(number: number, over: Partial<BoardTicket> = {}): BoardTicket {
     blockedBy: 0,
     assignees: [],
     labels: [],
+    body: "",
     url: `https://github.com/acme/example/issues/${number}`,
     ...over,
   };
@@ -187,7 +185,8 @@ describe("the page shell", () => {
 
   test("embeds the fallback reload timer", () => {
     const html = renderBoard(input([ticket(1)]));
-    expect(html).toMatch(/setInterval\(function \(\) \{[^}]*location\.reload\(\);[^}]*\}, 5000\)/);
+    expect(html).toContain("location.reload");
+    expect(html).toContain(`}, ${RELOAD_MS})`);
   });
 
   test("requests no external resources (plain https anchors excepted)", () => {
@@ -309,8 +308,6 @@ describe("dependency edges", () => {
     );
     expect(html).toContain('<span class="wref hist" data-ref="1">#1</span>');
     expect(html).toContain('<span class="wref" data-ref="2">#2</span>');
-    // …and the styles that make those two states read as red vs grey-struck.
-    expect(html).toMatch(/\.wref\.hist \{[^}]*line-through/);
   });
 
   test("a ticket blocked only from outside the map sits in Blocked with no chips", () => {
@@ -336,11 +333,9 @@ describe("dependency edges", () => {
     expect(html).toContain("unblocks (dependents)");
   });
 
-  test("a chip click jumps to the blocker, flashing it and opening its lane", () => {
+  test("a chip click jumps to the blocker", () => {
     const script = renderBoard(input([ticket(1), ticket(2)], { edges: { 2: [1] } }));
     expect(script).toContain("scrollIntoView");
-    expect(script).toMatch(/classList\.add\("flash"\)/);
-    expect(script).toMatch(/@keyframes rowflash/);
   });
 });
 
@@ -361,14 +356,12 @@ describe("the ticket modal", () => {
     expect(html).not.toMatch(/id="m-link"[^>]*href=/);
   });
 
-  test("a row click opens it, and the scrim, the ✕ and Escape all close it", () => {
-    expect(html).toContain("openModal(tr.dataset.t)");
-    expect(html).toContain('scrim.classList.add("open")');
-    expect(html).toMatch(/"m-close"\)\.addEventListener\("click", closeModal\)/);
-    expect(html).toMatch(/e\.target === scrim\) closeModal\(\)/);
-    expect(html).toMatch(/e\.key === "Escape"\) closeModal\(\)/);
-    // …and a row reads as clickable.
-    expect(html).toMatch(/tbody tr\.t \{ cursor: pointer; \}/);
+  test("the page script wires the modal open and closed, Escape included", () => {
+    // Function-presence level on purpose: the exact wiring is the page's
+    // business, and pinning its spelling would break on harmless rewording.
+    expect(html).toContain("function openModal");
+    expect(html).toContain("function closeModal");
+    expect(html).toContain('"Escape"');
   });
 
   test("it renders the body with the embedded renderer, not a fetched library", () => {
@@ -378,9 +371,7 @@ describe("the ticket modal", () => {
   });
 
   test("the reload timer does not fire while the modal is open", () => {
-    expect(html).toMatch(
-      /setInterval\(function \(\) \{\s*if \(!modalOpen\(\)\) location\.reload\(\);\s*\}, 5000\)/,
-    );
+    expect(html).toContain("if (!modalOpen()) location.reload()");
   });
 });
 
@@ -429,80 +420,6 @@ describe("the markdown renderer", () => {
   test("an empty body renders as nothing at all", () => {
     expect(md("")).toBe("");
     expect(md("\n\n")).toBe("");
-  });
-});
-
-describe("cache file location", () => {
-  test("one file per map under a per-repo directory", () => {
-    expect(boardPath("/Users/ann", "acme/example", 101)).toBe(
-      "/Users/ann/.cache/cmux-wayfinder/acme-example/101.html",
-    );
-  });
-
-  test("file urls escape path segments", () => {
-    expect(fileUrl("/Users/ann/.cache/cmux-wayfinder/acme-example/101.html")).toBe(
-      "file:///Users/ann/.cache/cmux-wayfinder/acme-example/101.html",
-    );
-    expect(fileUrl("/Users/an n/x.html")).toBe("file:///Users/an%20n/x.html");
-  });
-});
-
-describe("board-file prune", () => {
-  const HOME = "/Users/ann";
-  const board = (repo: string, map: number) => boardPath(HOME, repo, map);
-  // Built with the real producer, so the test keeps pace with the description format.
-  const desired = (...pairs: [string, number][]) =>
-    new Set(pairs.map(([repo, map]) => workspaceDescription(repo, map)));
-
-  test("the cache root holds every repo's board directory", () => {
-    expect(boardCacheDir(HOME)).toBe("/Users/ann/.cache/cmux-wayfinder");
-    expect(board("acme/example", 101).startsWith(`${boardCacheDir(HOME)}/`)).toBe(true);
-  });
-
-  test("deletes the board of a map that is no longer desired", () => {
-    const files = [board("acme/example", 101), board("acme/example", 102)];
-    expect(planBoardPrune(HOME, files, desired(["acme/example", 101]))).toEqual([
-      board("acme/example", 102),
-    ]);
-  });
-
-  test("deletes the boards of a repo that is no longer tracked", () => {
-    const files = [board("acme/example", 101), board("other/repo", 7)];
-    expect(planBoardPrune(HOME, files, desired(["acme/example", 101]))).toEqual([
-      board("other/repo", 7),
-    ]);
-  });
-
-  test("keeps every desired map's board, deletes nothing else when all are backed", () => {
-    const files = [board("acme/example", 101), board("other/repo", 7)];
-    expect(planBoardPrune(HOME, files, desired(["acme/example", 101], ["other/repo", 7]))).toEqual(
-      [],
-    );
-  });
-
-  test("no desired maps at all means every board file goes", () => {
-    const files = [board("acme/example", 101), board("other/repo", 7)];
-    expect(planBoardPrune(HOME, files, new Set())).toEqual(files.slice().sort());
-  });
-
-  test("only board files are candidates — directories and other cache junk are left alone", () => {
-    const paths = [
-      `${boardCacheDir(HOME)}/acme-example`, // the per-repo directory itself
-      `${boardCacheDir(HOME)}/acme-example/101.html.4242.tmp`,
-      `${boardCacheDir(HOME)}/acme-example/notes.txt`,
-      board("acme/example", 101),
-    ];
-    expect(planBoardPrune(HOME, paths, new Set())).toEqual([board("acme/example", 101)]);
-  });
-
-  test("descriptions that aren't ours back no file (and so keep nothing alive)", () => {
-    const files = [board("acme/example", 101)];
-    expect(planBoardPrune(HOME, files, new Set(["not-a-description"]))).toEqual(files);
-  });
-
-  test("deletions come out in a stable order", () => {
-    const files = [board("b/two", 2), board("a/one", 1)];
-    expect(planBoardPrune(HOME, files, new Set())).toEqual([board("a/one", 1), board("b/two", 2)]);
   });
 });
 

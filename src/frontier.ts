@@ -4,6 +4,8 @@
  *
  * Given `owner/repo`, discover open wayfinder maps and, per map, its sub-issues
  * with unblocked status — the raw material the sync CLI turns into cmux tabs.
+ * All the mapping from raw listing elements onto the domain shapes is pure and
+ * lives in `issues.ts`; this module is the executor that fetches.
  *
  * A sub-issue is *unblocked* when it is open AND has no open blockers.
  * GitHub's `issue_dependencies_summary.blocked_by` counts open blockers only
@@ -20,57 +22,30 @@
  */
 
 import { sh } from "./proc.ts";
-
-export type IssueState = "open" | "closed";
-
-export interface SubIssue {
-  number: number;
-  title: string;
-  state: IssueState;
-  /** Count of *open* blockers (GitHub drops closed ones from this field). */
-  blockedBy: number;
-  /** open && blockedBy === 0 — takeable right now. */
-  unblocked: boolean;
-  assignees: string[];
-  /** Label names — carries the `wayfinder:<type>` ticket-type label. */
-  labels: string[];
-  /**
-   * The issue's markdown body, as the lanes board's modal renders it. It rides
-   * the `sub_issues` listing already, so carrying it costs no extra call.
-   */
-  body: string;
-  url: string;
-  /**
-   * Blocker issue numbers, open *and* closed, repo-wide. {@link blockedBy} is
-   * the open-only count, so this list can be longer (history) or shorter
-   * (blockers this reader cannot see) — neither is a bug.
-   */
-  blockers: number[];
-}
-
-export interface WayfinderMap {
-  number: number;
-  title: string;
-  url: string;
-  /** All sub-issues, ascending by number. */
-  subIssues: SubIssue[];
-  /** The subset that is open + unblocked. */
-  frontier: SubIssue[];
-}
+import {
+  toBlockerNumbers,
+  toSubIssue,
+  type RawBlocker,
+  type RawMapIssue,
+  type RawSubIssue,
+  type WayfinderMap,
+} from "./issues.ts";
 
 const MAP_LABEL = "wayfinder:map";
 
 /**
  * GET a paginated list endpoint via `gh api`, returning every element across
  * all pages. `--paginate` follows Link headers; `--jq '.[]'` flattens each
- * page's array into newline-delimited JSON we parse line by line.
+ * page's array into newline-delimited JSON we parse line by line. `T` is the
+ * caller's claim about the element shape — this is the process's one untyped
+ * boundary, so the raw types in `issues.ts` keep the claim to fields we read.
  */
-async function ghList(path: string): Promise<any[]> {
+async function ghList<T>(path: string): Promise<T[]> {
   const out = await sh(["gh", "api", path, "--paginate", "--jq", ".[]"]);
   return out
     .split("\n")
     .filter((line) => line.trim())
-    .map((line) => JSON.parse(line));
+    .map((line) => JSON.parse(line) as T);
 }
 
 /**
@@ -89,38 +64,6 @@ async function mapPooled<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise
   };
   await Promise.all(Array.from({ length: Math.min(POOL, items.length) }, worker));
   return out;
-}
-
-/** One element of the `sub_issues` listing, plus its separately-read blockers. */
-export function toSubIssue(raw: any, blockers: number[]): SubIssue {
-  const blockedBy: number = raw.issue_dependencies_summary?.blocked_by ?? 0;
-  const state: IssueState = raw.state === "closed" ? "closed" : "open";
-  return {
-    number: raw.number,
-    title: raw.title,
-    state,
-    blockedBy,
-    unblocked: state === "open" && blockedBy === 0,
-    assignees: (raw.assignees ?? []).map((a: any) => a.login),
-    labels: (raw.labels ?? []).map((l: any) => l?.name).filter(Boolean),
-    // GitHub sends `null` for an issue opened with no description.
-    body: raw.body ?? "",
-    url: raw.html_url,
-    blockers,
-  };
-}
-
-/** The issue numbers of a `dependencies/blocked_by` listing, ascending. */
-export function toBlockerNumbers(raw: any[]): number[] {
-  return raw.map((b: any) => b.number as number).sort((a, b) => a - b);
-}
-
-/**
- * Every sub-issue keyed to its blockers — the edge list the lanes board embeds.
- * Refs to issues outside the map are the board's to drop, not this reader's.
- */
-export function blockedByEdges(subIssues: SubIssue[]): Record<string, number[]> {
-  return Object.fromEntries(subIssues.map((s) => [String(s.number), s.blockers]));
 }
 
 /**
@@ -149,7 +92,7 @@ export async function readFrontier(repo: string): Promise<WayfinderMap[]> {
  * and wants the canonical name for other purposes (e.g. sync identity keys).
  */
 export async function readFrontierFor(canonical: string): Promise<WayfinderMap[]> {
-  const rawMaps = await ghList(
+  const rawMaps = await ghList<RawMapIssue>(
     `repos/${canonical}/issues?state=open&labels=${MAP_LABEL}&per_page=100`,
   );
   // The issues listing can include pull requests; the label filter already
@@ -158,14 +101,18 @@ export async function readFrontierFor(canonical: string): Promise<WayfinderMap[]
 
   return Promise.all(
     maps.map(async (m): Promise<WayfinderMap> => {
-      const rawSubs = await ghList(`repos/${canonical}/issues/${m.number}/sub_issues?per_page=100`);
+      const rawSubs = await ghList<RawSubIssue>(
+        `repos/${canonical}/issues/${m.number}/sub_issues?per_page=100`,
+      );
       // One `blocked_by` call per sub-issue — the pass's only per-ticket cost.
       const subIssues = (
         await mapPooled(rawSubs, async (raw) =>
           toSubIssue(
             raw,
             toBlockerNumbers(
-              await ghList(`repos/${canonical}/issues/${raw.number}/dependencies/blocked_by`),
+              await ghList<RawBlocker>(
+                `repos/${canonical}/issues/${raw.number}/dependencies/blocked_by`,
+              ),
             ),
           ),
         )

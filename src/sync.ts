@@ -25,23 +25,21 @@ import { dirname, join } from "node:path";
 
 import { sh } from "./proc.ts";
 import { loadTracked, type TrackedRepo } from "./config.ts";
-import { blockedByEdges, readFrontierFor, resolveRepo, type WayfinderMap } from "./frontier.ts";
+import { readFrontierFor, resolveRepo } from "./frontier.ts";
+import { blockedByEdges, type WayfinderMap } from "./issues.ts";
 import * as cmux from "./cmux.ts";
+import { formatGeneratedAt, renderBoard } from "./board.ts";
 import {
   boardCacheDir,
   boardPath,
   fileUrl,
-  formatGeneratedAt,
-  planBoardPrune,
-  renderBoard,
-} from "./board.ts";
-import {
   groupName,
   isManagedWorkspaceTitle,
   isMapComplete,
   lanesTabTitle,
   mapTabTitle,
   parseManagedTabTitle,
+  planBoardPrune,
   planTabs,
   planWorkspacePrune,
   workspaceDescription,
@@ -304,6 +302,11 @@ async function syncBoard(ctx: {
   // reload is still part of the plan we print.
   if (opts.dryRun || surface) log.act(`reload browser tab "${title}"`);
   if (!opts.dryRun && surface) await cmux.reloadBrowser(surface.id);
+  // A live pass that cannot see the tab (creation failed to settle) skips the
+  // rpc — say so rather than skip silently; the page's own timer self-heals.
+  if (!opts.dryRun && !surface) {
+    log.info(`    ⚠ board tab "${title}" not visible to reload — the page's timer will pick it up`);
+  }
 }
 
 /** Write a file via temp + rename, creating its parent directory. */
