@@ -41,6 +41,7 @@ function sub(
     unblocked: state === "open" && blockedBy === 0,
     assignees: [],
     labels,
+    body: "",
     url: `https://x/${number}`,
     blockers: [],
   };

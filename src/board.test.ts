@@ -3,16 +3,19 @@ import {
   boardPath,
   boardPayload,
   dependentsOf,
+  ESC_SOURCE,
   fileUrl,
   inMapEdges,
   laneOf,
   LANE_ORDER,
+  MD_SOURCE,
   partitionLanes,
   renderBoard,
   type BoardInput,
   type BoardPayload,
   type BoardTicket,
 } from "./board.ts";
+import { toSubIssue } from "./frontier.ts";
 import { lanesTabTitle } from "./plan.ts";
 
 function ticket(number: number, over: Partial<BoardTicket> = {}): BoardTicket {
@@ -141,6 +144,27 @@ describe("embedded payload", () => {
   test("a body-less ticket round-trips as an empty body", () => {
     expect(payloadOf(renderBoard(input([ticket(1)]))).tickets["1"].body).toBe("");
   });
+
+  test("a sub-issue read off the listing carries its body straight through", () => {
+    // The body rides the `sub_issues` listing the reader already fetches, so it
+    // reaches the modal without a second call per ticket.
+    const sub = toSubIssue(
+      {
+        number: 7,
+        title: "Do the thing",
+        state: "open",
+        issue_dependencies_summary: { blocked_by: 0 },
+        assignees: [],
+        labels: [{ name: "wayfinder:task" }],
+        body: "## What to build\n\n- one\n- two",
+        html_url: "https://github.com/acme/example/issues/7",
+      },
+      [],
+    );
+    expect(payloadOf(renderBoard(input([sub]))).tickets["7"].body).toBe(
+      "## What to build\n\n- one\n- two",
+    );
+  });
 });
 
 describe("the page shell", () => {
@@ -153,7 +177,7 @@ describe("the page shell", () => {
 
   test("embeds the fallback reload timer", () => {
     const html = renderBoard(input([ticket(1)]));
-    expect(html).toMatch(/setInterval\(function \(\) \{ location\.reload\(\); \}, 5000\)/);
+    expect(html).toMatch(/setInterval\(function \(\) \{[\s\S]*location\.reload\(\);[\s\S]*\}, 5000\)/);
   });
 
   test("requests no external resources (plain https anchors excepted)", () => {
@@ -166,7 +190,10 @@ describe("the page shell", () => {
     expect(html).not.toMatch(/<iframe\b/i);
     expect(html).not.toMatch(/@import/i);
     expect(html).not.toMatch(/url\(\s*['"]?https?:/i);
-    const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
+    // Anchors are checked over the markup only: the inline script's markdown
+    // renderer holds an `<a href="$2">` *template*, which is not a request.
+    const markup = html.replace(/<script[\s\S]*?<\/script>/g, "");
+    const hrefs = [...markup.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
     expect(hrefs.length).toBeGreaterThan(0);
     for (const h of hrefs) expect(h.startsWith("https://")).toBe(true);
   });
@@ -304,6 +331,94 @@ describe("dependency edges", () => {
     expect(script).toContain("scrollIntoView");
     expect(script).toMatch(/classList\.add\("flash"\)/);
     expect(script).toMatch(/@keyframes rowflash/);
+  });
+});
+
+describe("the ticket modal", () => {
+  const html = renderBoard(
+    input([ticket(1), ticket(2, { blockedBy: 1 })], { edges: { 2: [1] } }),
+  );
+
+  test("the page carries the modal shell — meta chips, body and the GitHub link", () => {
+    expect(html).toContain('<div id="scrim">');
+    expect(html).toContain('<div id="modal" role="dialog" aria-modal="true">');
+    for (const id of ["m-title", "m-meta", "m-body", "m-link", "m-close"]) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html).toContain("Open on GitHub ↗");
+    // The link's href is set from the payload at open time, so the static page
+    // still requests nothing.
+    expect(html).not.toMatch(/id="m-link"[^>]*href=/);
+  });
+
+  test("a row click opens it, and the scrim, the ✕ and Escape all close it", () => {
+    expect(html).toContain("openModal(tr.dataset.t)");
+    expect(html).toContain('scrim.classList.add("open")');
+    expect(html).toMatch(/"m-close"\)\.addEventListener\("click", closeModal\)/);
+    expect(html).toMatch(/e\.target === scrim\) closeModal\(\)/);
+    expect(html).toMatch(/e\.key === "Escape"\) closeModal\(\)/);
+    // …and a row reads as clickable.
+    expect(html).toMatch(/tbody tr\.t \{ cursor: pointer; \}/);
+  });
+
+  test("it renders the body with the embedded renderer, not a fetched library", () => {
+    expect(html).toContain(MD_SOURCE);
+    expect(html).toContain(ESC_SOURCE);
+    expect(html).toContain('"m-body").innerHTML = md(');
+  });
+
+  test("the reload timer does not fire while the modal is open", () => {
+    expect(html).toMatch(
+      /setInterval\(function \(\) \{\s*if \(!modalOpen\(\)\) location\.reload\(\);\s*\}, 5000\)/,
+    );
+  });
+});
+
+describe("the markdown renderer", () => {
+  /** The renderer exactly as it ships in the page, evaluated on its own. */
+  const md = new Function(`${ESC_SOURCE}\n${MD_SOURCE}\nreturn md;`)() as (s: string) => string;
+
+  test("headings, lists and paragraphs", () => {
+    expect(md("## Parent\n\nplain line")).toBe("<h3>Parent</h3><p>plain line</p>");
+    expect(md("# Top")).toBe("<h2>Top</h2>");
+    expect(md("#### four")).toBe("<h4>four</h4>");
+    // Deeper than h4 is not a heading at all — it reads as plain text.
+    expect(md("##### five")).toBe("<p>##### five</p>");
+    expect(md("- one\n- two\n\nafter")).toBe(
+      "<ul><li>one</li><li>two</li></ul><p>after</p>",
+    );
+    expect(md("- [ ] a checkbox item")).toBe("<ul><li>[ ] a checkbox item</li></ul>");
+  });
+
+  test("inline code, bold, italic, http links and #n refs", () => {
+    expect(md("use `--prune` now")).toBe("<p>use <code>--prune</code> now</p>");
+    expect(md("**bold** and *italic*")).toBe("<p><b>bold</b> and <i>italic</i></p>");
+    expect(md("see [the spec](https://example.com/s)")).toBe(
+      '<p>see <a href="https://example.com/s" target="_blank" rel="noopener">the spec</a></p>',
+    );
+    expect(md("blocked by #8")).toBe("<p>blocked by <b>#8</b></p>");
+  });
+
+  test("code fences keep their contents verbatim, markup and all", () => {
+    expect(md("```\n<b>x</b> & *y*\n```")).toBe(
+      "<pre><code>&lt;b&gt;x&lt;/b&gt; &amp; *y*</code></pre>",
+    );
+    // An unterminated fence still closes rather than swallowing the body.
+    expect(md("```\nstill open")).toBe("<pre><code>still open</code></pre>");
+  });
+
+  test("everything else is escaped — a body cannot inject markup", () => {
+    expect(md('<img src=x onerror="alert(1)">')).toBe(
+      "<p>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;</p>",
+    );
+    expect(md("<script>evil()</script>")).toBe("<p>&lt;script&gt;evil()&lt;/script&gt;</p>");
+    // A non-http scheme is left as text, so no link can smuggle one in.
+    expect(md("[click](javascript:alert(1))")).toBe("<p>[click](javascript:alert(1))</p>");
+  });
+
+  test("an empty body renders as nothing at all", () => {
+    expect(md("")).toBe("");
+    expect(md("\n\n")).toBe("");
   });
 });
 

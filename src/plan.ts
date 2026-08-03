@@ -177,8 +177,11 @@ export function ticketPrompt(mapNumber: number, ticket: number): string {
 
 export type TicketType = "grilling" | "task" | "research" | "prototype";
 
-/** X slot — one emoji per `wayfinder:<type>` ticket-type label. */
-const TYPE_EMOJI: Record<TicketType, string> = {
+/**
+ * X slot — one emoji per `wayfinder:<type>` ticket-type label. The lanes board
+ * embeds this table so its modal badges a ticket exactly like its tab does.
+ */
+export const TYPE_EMOJI: Record<TicketType, string> = {
   grilling: "🗣️",
   task: "🔨",
   research: "🔎",

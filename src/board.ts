@@ -17,7 +17,7 @@
  */
 
 import type { IssueState } from "./frontier.ts";
-import { DONE, lanesTabTitle, mapLabel, readinessOf, typeEmojiOf } from "./plan.ts";
+import { DONE, lanesTabTitle, mapLabel, readinessOf, TYPE_EMOJI, typeEmojiOf } from "./plan.ts";
 
 // ---------- inputs ----------
 
@@ -223,6 +223,87 @@ function embeddedJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
+/**
+ * View-time HTML escaping, as source text rather than a function: the modal
+ * builds its markup out of the embedded payload inside the page, so it needs its
+ * own copy of what {@link esc} does at generation time. Shipped as a string so
+ * tests can evaluate the very code the page runs.
+ */
+export const ESC_SOURCE = `function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }`;
+
+/**
+ * The tiny markdown renderer the modal draws a ticket body with, ported from
+ * the prototype. Headings, lists, code fences, inline code/bold/italic, http(s)
+ * links and `#n` refs — everything else is escaped, so a body can never inject
+ * markup. Deliberately no external library: the page must stay self-contained.
+ *
+ * Source text for the same reason as {@link ESC_SOURCE} (it uses that `esc`),
+ * and tested by evaluating the pair.
+ */
+export const MD_SOURCE = `function md(src) {
+    function inline(s) {
+      return esc(s)
+        .replace(/\`([^\`]+)\`/g, "<code>$1</code>")
+        .replace(/\\*\\*([^*]+)\\*\\*/g, "<b>$1</b>")
+        .replace(/(^|[^*])\\*([^*\\n]+)\\*/g, "$1<i>$2</i>")
+        .replace(/\\[([^\\]]+)\\]\\((https?:[^)\\s]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+        .replace(/(^|\\s)(#(\\d{1,4}))\\b/g, "$1<b>$2</b>");
+    }
+    var lines = String(src).replace(/\\r/g, "").split("\\n");
+    var out = "", inList = false, inPre = false, pre = [];
+    function closeList() { if (inList) { out += "</ul>"; inList = false; } }
+    function flushPre() { out += "<pre><code>" + esc(pre.join("\\n")) + "</code></pre>"; pre = []; }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (inPre) {
+        if (/^\`\`\`/.test(line)) { flushPre(); inPre = false; } else pre.push(line);
+        continue;
+      }
+      if (/^\`\`\`/.test(line)) { closeList(); inPre = true; continue; }
+      var h = /^(#{1,4})\\s+(.*)/.exec(line);
+      if (h) {
+        closeList();
+        var lv = Math.min(h[1].length + 1, 4);
+        out += "<h" + lv + ">" + inline(h[2]) + "</h" + lv + ">";
+        continue;
+      }
+      var li = /^\\s*[-*]\\s+(.*)/.exec(line);
+      if (li) {
+        if (!inList) { out += "<ul>"; inList = true; }
+        out += "<li>" + inline(li[1]) + "</li>";
+        continue;
+      }
+      closeList();
+      if (line.trim() === "") continue;
+      out += "<p>" + inline(line) + "</p>";
+    }
+    // An unterminated fence still closes, rather than swallowing the rest.
+    if (inPre) flushPre();
+    closeList();
+    return out;
+  }`;
+
+/**
+ * The modal's shell — empty until a row click fills it from the embedded
+ * payload. The GitHub link gets its `href` then too, so the page as written
+ * still points at nothing external.
+ */
+const MODAL = `<div id="scrim">
+  <div id="modal" role="dialog" aria-modal="true">
+    <div class="m-head">
+      <h2 id="m-title"></h2>
+      <button class="m-close" id="m-close" aria-label="Close">✕</button>
+    </div>
+    <div class="m-meta" id="m-meta"></div>
+    <div class="m-body" id="m-body"></div>
+    <div class="m-foot"><a id="m-link" target="_blank" rel="noopener">Open on GitHub ↗</a></div>
+  </div>
+</div>`;
+
 function statStrip(lanes: Record<Lane, BoardTicket[]>): string {
   const cards = LANE_ORDER.map((lane) => {
     const count = lanes[lane].length;
@@ -333,6 +414,7 @@ ${statStrip(lanes)}
 <tbody>${sections}</tbody>
 </table></div>
 </div></div>
+${MODAL}
 <script id="board-data" type="application/json">${embeddedJson(boardPayload(input))}</script>
 <script>
 ${pageScript(input.map.number)}
@@ -345,8 +427,8 @@ ${pageScript(input.map.number)}
 /**
  * The page's own behaviour: collapsible lane sections (persisted best-effort in
  * localStorage, degrading silently to the generated defaults when `file://`
- * storage is unavailable), the two-way dependency spotlight, chip jumps, and
- * the fallback reload timer.
+ * storage is unavailable), the two-way dependency spotlight, chip jumps, the
+ * ticket modal, and the fallback reload timer.
  *
  * The webview does not watch files, so a board whose rpc reload was skipped or
  * failed would otherwise sit stale — this timer is the self-heal. Written as
@@ -356,8 +438,17 @@ ${pageScript(input.map.number)}
 function pageScript(mapNumber: number): string {
   return `(function () {
   var KEY = "cmux-wayfinder:lanes:${mapNumber}";
+  var DATA = JSON.parse(document.getElementById("board-data").textContent);
+  var LANE_NAME = ${embeddedJson(LANE_NAME)};
+  var TYPE_EMOJI = ${embeddedJson(TYPE_EMOJI)};
+  var TYPES = Object.keys(TYPE_EMOJI);
   var stage = document.getElementById("stage");
   var table = stage.querySelector("table");
+  var scrim = document.getElementById("scrim");
+
+  ${ESC_SOURCE}
+
+  ${MD_SOURCE}
 
   function rowOf(n) { return stage.querySelector('tr.t[data-t="' + n + '"]'); }
   function rowsOf(lane) { return document.querySelectorAll('tr.t[data-lane="' + lane + '"]'); }
@@ -432,7 +523,44 @@ function pageScript(mapNumber: number): string {
   });
   stage.addEventListener("mouseleave", clearFx);
 
-  // ---- clicks: chips jump along an edge, section headers toggle a lane ----
+  // ---- the ticket modal: read a body without leaving cmux ----
+
+  /** The ticket's \`wayfinder:<type>\` label; an unlabeled ticket is a task. */
+  function typeOf(labels) {
+    for (var i = 0; i < labels.length; i++) {
+      var t = labels[i].replace(/^wayfinder:/, "");
+      if (t !== labels[i] && TYPES.indexOf(t) !== -1) return t;
+    }
+    return "task";
+  }
+
+  function modalOpen() { return scrim.classList.contains("open"); }
+  function closeModal() { scrim.classList.remove("open"); }
+
+  function openModal(n) {
+    var t = DATA.tickets[n];
+    if (!t) return;
+    var type = typeOf(t.labels);
+    document.getElementById("m-title").innerHTML =
+      TYPE_EMOJI[type] + ' <span class="m-num">#' + t.number + "</span> " + esc(t.title);
+    var meta = ['<span class="lane-chip">' + esc(LANE_NAME[t.lane]) + "</span>",
+                "<span>" + esc(type) + "</span>"];
+    if (t.assignees.length) meta.push("<span>@" + esc(t.assignees[0]) + "</span>");
+    // In-map blockers only — the same edges the row's chips are drawn from.
+    var blockers = DATA.edges[n] || [];
+    if (blockers.length) meta.push("<span>blocked by #" + blockers.join(", #") + "</span>");
+    document.getElementById("m-meta").innerHTML = meta.join("");
+    document.getElementById("m-body").innerHTML = md(t.body || "*no description*");
+    document.getElementById("m-link").href = t.html_url;
+    scrim.classList.add("open");
+  }
+
+  scrim.addEventListener("click", function (e) { if (e.target === scrim) closeModal(); });
+  document.getElementById("m-close").addEventListener("click", closeModal);
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
+
+  // ---- clicks: chips jump along an edge, section headers toggle a lane,
+  //      and a row opens its ticket ----
 
   stage.addEventListener("click", function (e) {
     var chip = e.target.closest(".wref");
@@ -449,13 +577,21 @@ function pageScript(mapNumber: number): string {
       return;
     }
     var sec = e.target.closest("tr.sec");
-    if (!sec) return;
-    var lane = sec.dataset.sec;
-    setLane(lane, !isCollapsed(lane));
-    remember();
+    if (sec) {
+      var lane = sec.dataset.sec;
+      setLane(lane, !isCollapsed(lane));
+      remember();
+      return;
+    }
+    var tr = e.target.closest("tr.t");
+    if (tr) openModal(tr.dataset.t);
   });
 
-  setInterval(function () { location.reload(); }, ${RELOAD_MS});
+  // The fallback reload, paused while the modal is open so a refresh never
+  // interrupts reading — the next tick after it closes picks the board back up.
+  setInterval(function () {
+    if (!modalOpen()) location.reload();
+  }, ${RELOAD_MS});
 })();`;
 }
 
@@ -464,9 +600,40 @@ const STYLES = `  * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body { font-family: system-ui, -apple-system, sans-serif; }
   #stage { min-height: 100vh; }
+  button { font: inherit; cursor: pointer; }
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; animation: none !important; }
   }
+
+  /* ---- ticket modal ---- */
+  #scrim { position: fixed; inset: 0; z-index: 800; background: rgba(10,12,16,0.55);
+    display: none; align-items: center; justify-content: center; padding: 4vh 16px; }
+  #scrim.open { display: flex; }
+  #modal { width: min(680px, 100%); max-height: 88vh; overflow-y: auto;
+    background: #fff; color: #23262d; border-radius: 12px;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.5); padding: 22px 26px; }
+  #modal .m-head { display: flex; align-items: flex-start; gap: 10px; }
+  #modal .m-head h2 { margin: 0; font-size: 18px; line-height: 1.3; flex: 1; text-wrap: balance; }
+  #modal .m-num { color: #7a828f; font-weight: 400; }
+  #modal .m-close { border: none; background: #eef0f3; border-radius: 6px; width: 28px;
+    height: 28px; font-size: 14px; color: #555; }
+  #modal .m-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 4px; font-size: 11.5px; }
+  #modal .m-meta span { background: #f0f2f5; border-radius: 20px; padding: 3px 10px; color: #4a5160; }
+  #modal .m-meta span.lane-chip { font-weight: 600; }
+  #modal .m-body { font-size: 14px; line-height: 1.65; }
+  #modal .m-body h2 { font-size: 15px; margin: 18px 0 6px; }
+  #modal .m-body h3 { font-size: 13.5px; margin: 14px 0 4px; }
+  #modal .m-body ul { padding-left: 22px; margin: 6px 0; }
+  #modal .m-body li { margin: 3px 0; }
+  #modal .m-body code { background: #f0f2f5; border-radius: 4px; padding: 1px 5px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  #modal .m-body pre { background: #f0f2f5; border-radius: 8px; padding: 12px; overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5; }
+  #modal .m-body pre code { background: none; padding: 0; }
+  #modal .m-body a { color: #2563c4; }
+  #modal .m-foot { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e8eaee; }
+  #modal .m-foot a { color: #2563c4; text-decoration: none; font-size: 13px; font-weight: 500; }
+  #modal .m-foot a:hover { text-decoration: underline; }
 
   .v-classic { background: #fcfcfd; color: #24292f; min-height: 100vh; padding: 30px 36px 110px;
     font-size: 13px; }
@@ -513,6 +680,7 @@ const STYLES = `  * { box-sizing: border-box; }
   .v-classic .sec-frontier td { color: #1a7f37; box-shadow: inset 3px 0 0 #2da44e; }
   .v-classic .sec-inprogress td { color: #205a9e; box-shadow: inset 3px 0 0 #3b82d9; }
   .v-classic .sec-resolved td { color: #6e7781; box-shadow: inset 3px 0 0 #afb8c1; }
+  .v-classic tbody tr.t { cursor: pointer; }
   .v-classic tbody tr.t:hover { background: #f3f6f9; }
   .v-classic tbody tr.hidden-lane { display: none; }
   .v-classic td { padding: 7px 12px; border-bottom: 1px solid #eef1f4;

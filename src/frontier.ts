@@ -34,6 +34,11 @@ export interface SubIssue {
   assignees: string[];
   /** Label names — carries the `wayfinder:<type>` ticket-type label. */
   labels: string[];
+  /**
+   * The issue's markdown body, as the lanes board's modal renders it. It rides
+   * the `sub_issues` listing already, so carrying it costs no extra call.
+   */
+  body: string;
   url: string;
   /**
    * Blocker issue numbers, open *and* closed, repo-wide. {@link blockedBy} is
@@ -98,6 +103,8 @@ export function toSubIssue(raw: any, blockers: number[]): SubIssue {
     unblocked: state === "open" && blockedBy === 0,
     assignees: (raw.assignees ?? []).map((a: any) => a.login),
     labels: (raw.labels ?? []).map((l: any) => l?.name).filter(Boolean),
+    // GitHub sends `null` for an issue opened with no description.
+    body: raw.body ?? "",
     url: raw.html_url,
     blockers,
   };

@@ -10,6 +10,7 @@ function raw(number: number, over: Record<string, unknown> = {}) {
     issue_dependencies_summary: { blocked_by: 0 },
     assignees: [],
     labels: [],
+    body: "",
     html_url: `https://github.com/acme/example/issues/${number}`,
     ...over,
   };
@@ -23,6 +24,7 @@ describe("toSubIssue", () => {
         issue_dependencies_summary: { blocked_by: 1 },
         assignees: [{ login: "ann" }],
         labels: [{ name: "wayfinder:task" }, { name: "ready-for-agent" }],
+        body: "## What to build\n\nthe thing",
       }),
       [3, 5],
     );
@@ -34,9 +36,17 @@ describe("toSubIssue", () => {
       unblocked: false,
       assignees: ["ann"],
       labels: ["wayfinder:task", "ready-for-agent"],
+      body: "## What to build\n\nthe thing",
       url: "https://github.com/acme/example/issues/7",
       blockers: [3, 5],
     });
+  });
+
+  test("a body-less element reads as an empty body", () => {
+    // GitHub sends `body: null` for an issue opened with no description.
+    expect(toSubIssue(raw(1, { body: null }), []).body).toBe("");
+    const { body, ...noBodyField } = raw(1);
+    expect(toSubIssue(noBodyField, []).body).toBe("");
   });
 
   test("unblocked is open with no open blockers — closed blockers do not count", () => {

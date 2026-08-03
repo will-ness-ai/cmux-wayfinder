@@ -37,7 +37,10 @@ Reads `tracked.yaml` (list of tracked repos + local checkout paths), discovers o
   network calls**, so it renders for private repos too. Rows carry
   **waiting-on chips** (red = open blocker, grey-struck = closed one); hovering
   a row dims the board and lights what it waits on amber and what it unblocks
-  blue, and clicking a chip jumps to that blocker's row
+  blue, and clicking a chip jumps to that blocker's row. Clicking a **row**
+  opens the ticket's body as rendered markdown in a modal (meta chips + an
+  "Open on GitHub ↗" link; scrim click or Escape closes it) — the self-reload
+  pauses while it is open, so a refresh never interrupts your reading
 - one **tab** per open+unblocked sub-issue (title `[XY]<ticket#>`): launches
   `claude --worktree wayfinder/<map#>/<ticket#>`, waits for the TUI, then types
   `/wayfinder map #<map#> work on ticket #<ticket#>` into the input box and
