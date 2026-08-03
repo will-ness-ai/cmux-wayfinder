@@ -28,6 +28,19 @@ Reads `tracked.yaml` (list of tracked repos + local checkout paths), discovers o
   the sidebar reads by name while sync still matches on the stable id
 - one **browser tab** per workspace (title `map #<map#>`), open to the map
   issue — *enforced*: recreated (pinned leftmost) if you close it
+- a second **browser tab** right of it (title `lanes #<map#>`) — the **lanes
+  board**: a generated, self-contained `file://` page showing the map's
+  sub-issues as a sprint-lane ledger (In progress → Frontier → Blocked →
+  Resolved). Also *enforced*. Each pass regenerates the file under
+  `~/.cache/cmux-wayfinder/<owner>-<repo>/<map#>.html` and reloads the tab; the
+  page also self-reloads every ~5s, so it never sits stale. It makes **zero
+  network calls**, so it renders for private repos too. Rows carry
+  **waiting-on chips** (red = open blocker, grey-struck = closed one); hovering
+  a row dims the board and lights what it waits on amber and what it unblocks
+  blue, and clicking a chip jumps to that blocker's row. Clicking a **row**
+  opens the ticket's body as rendered markdown in a modal (meta chips + an
+  "Open on GitHub ↗" link; scrim click or Escape closes it) — the self-reload
+  pauses while it is open, so a refresh never interrupts your reading
 - one **tab** per open+unblocked sub-issue (title `[XY]<ticket#>`): launches
   `claude --worktree wayfinder/<map#>/<ticket#>`, waits for the TUI, then types
   `/wayfinder map #<map#> work on ticket #<ticket#>` into the input box and
@@ -43,7 +56,7 @@ Tab titles are `[XY]<ticket#>`:
   defaults HITL → 🫵. ✓ takes the slot once the ticket closes. Legacy
   `<n>`/`✓<n>` tabs upgrade to the bracketed form on the next run.
 
-Sync is additive + rename-only by default (closed tickets → `[X✓]<n>` tabs); nothing is closed without `--prune`.
+Sync is additive + rename-only by default (closed tickets → `[X✓]<n>` tabs); nothing is closed or deleted without `--prune`.
 
 ## Usage
 
@@ -52,7 +65,7 @@ bun install
 cp tracked.example.yaml tracked.yaml   # then edit for your repos + local paths
 bun src/sync.ts --dry-run     # print the plan, touch nothing
 bun src/sync.ts               # materialize into live cmux (additive + rename-only)
-bun src/sync.ts --prune       # also close stale tabs / dead-map workspaces
+bun src/sync.ts --prune       # also close stale tabs / dead-map workspaces + delete their boards
 bun src/sync.ts --config path/to/tracked.yaml
 bun src/sync.ts --watch       # re-sync every 30s until killed
 bun src/sync.ts --watch 120   # ... every 120s
@@ -67,8 +80,11 @@ every group/workspace/tab it *would* create, without contacting cmux.
 `--watch [sec]` loops forever: sync, sleep `sec` seconds (default 30), repeat —
 runs never overlap, and `tracked.yaml` is re-read each pass. GitHub's budget is
 5,000 authenticated requests/hour (shared with everything else `gh` does on your
-token); a pass costs ~2 GETs per repo + 1 per open map, so 30s (120 passes/hr)
-is comfortable for typical setups — e.g. 3 repos / 6 maps ≈ 1,440/hr. The loop
+token); a pass costs ~2 GETs per repo + 1 per open map + 1 per sub-issue (its
+blocked-by list, which the board's chips are drawn from) — e.g. 3 repos / 6 maps
+/ 40 tickets ≈ 6,240/hr at 30s, over budget, where a 120s cadence lands at a
+comfortable ~1,560/hr. The per-ticket term dominates once a map fills up, so
+prefer a longer interval over a busy one. The loop
 warns if projected spend crosses half the budget, and on a failed pass it checks
 `gh api rate_limit` (a free endpoint) and sleeps until the window resets if the
 budget is exhausted.
@@ -82,8 +98,8 @@ Workspace creation uses the v1 `cmux new-workspace` CLI (the only path that
 honors title/cwd/description/group at creation); everything else goes over the
 v2 `cmux rpc` socket.
 
-`--prune` is the only path that ever closes anything (never the default). It
-runs a normal additive sync first, then closes:
+`--prune` is the only path that ever closes or deletes anything (never the
+default). It runs a normal additive sync first, then closes:
 - **done/stale ticket tabs** — a managed `[XY]<n>` (or legacy `<n>`/`✓<n>`) tab
   whose ticket is no longer open (closed, or dropped from the map). A ticket
   that is still open but
@@ -95,9 +111,15 @@ runs a normal additive sync first, then closes:
   behind (identified by `group.anchor_workspace_id`); emptying a group then
   auto-removes it.
 
+It then deletes the **stale lanes-board files**: every `.html` under
+`~/.cache/cmux-wayfinder/` that no open, tracked map backs — the boards of maps
+that closed and of repos that left `tracked.yaml`. A live map's board is never
+touched, and nothing else sharing that directory is a candidate.
+
 Pair it with `--dry-run` first (`bun src/sync.ts --prune --dry-run`) to see
-exactly what would close. Because `--prune` can close the workspace you're
-sitting in, it may move your cmux selection — expected under prune only.
+exactly what would close and what would be deleted. Because `--prune` can close
+the workspace you're sitting in, it may move your cmux selection — expected
+under prune only.
 
 Known v1 limitations:
 - `cmux rpc workspace.group.create` leaves a stray empty anchor workspace in

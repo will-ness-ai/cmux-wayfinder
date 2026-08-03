@@ -179,6 +179,15 @@ export async function createBrowserSurface(workspace_id: string, url: string): P
   return created.id;
 }
 
+/**
+ * Reload a browser tab in place. The webview does not watch files, so this is
+ * how a rewritten `file://` board reaches an open tab (verified live in the
+ * file-board research spike).
+ */
+export async function reloadBrowser(surface_id: string): Promise<void> {
+  await rpc("browser.reload", { surface_id });
+}
+
 export async function renameTab(surface_id: string, title: string): Promise<void> {
   await rpc("tab.action", { action: "rename", surface_id, title });
 }

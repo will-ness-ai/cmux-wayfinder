@@ -4,72 +4,66 @@
  *
  * Given `owner/repo`, discover open wayfinder maps and, per map, its sub-issues
  * with unblocked status — the raw material the sync CLI turns into cmux tabs.
+ * All the mapping from raw listing elements onto the domain shapes is pure and
+ * lives in `issues.ts`; this module is the executor that fetches.
  *
  * A sub-issue is *unblocked* when it is open AND has no open blockers.
  * GitHub's `issue_dependencies_summary.blocked_by` counts open blockers only
  * (closed blockers drop off), so `blocked_by === 0` is exactly "unblocked".
  * That summary rides inline on each element of the `sub_issues` listing, so no
- * per-sub-issue second call is needed.
+ * per-sub-issue second call is needed for it.
+ *
+ * The *identities* of the blockers do need one: the `dependencies/blocked_by`
+ * listing, one call per sub-issue per pass. Unlike the summary count it keeps
+ * closed blockers, which is what the board's historical (grey-struck) chips are
+ * drawn from — so the two numbers legitimately disagree.
  *
  * Run directly to print the frontier:  bun src/frontier.ts <owner/repo> [...]
  */
 
 import { sh } from "./proc.ts";
-
-export type IssueState = "open" | "closed";
-
-export interface SubIssue {
-  number: number;
-  title: string;
-  state: IssueState;
-  /** Count of *open* blockers (GitHub drops closed ones from this field). */
-  blockedBy: number;
-  /** open && blockedBy === 0 — takeable right now. */
-  unblocked: boolean;
-  assignees: string[];
-  /** Label names — carries the `wayfinder:<type>` ticket-type label. */
-  labels: string[];
-  url: string;
-}
-
-export interface WayfinderMap {
-  number: number;
-  title: string;
-  url: string;
-  /** All sub-issues, ascending by number. */
-  subIssues: SubIssue[];
-  /** The subset that is open + unblocked. */
-  frontier: SubIssue[];
-}
+import {
+  toBlockerNumbers,
+  toSubIssue,
+  type RawBlocker,
+  type RawMapIssue,
+  type RawSubIssue,
+  type WayfinderMap,
+} from "./issues.ts";
 
 const MAP_LABEL = "wayfinder:map";
 
 /**
  * GET a paginated list endpoint via `gh api`, returning every element across
  * all pages. `--paginate` follows Link headers; `--jq '.[]'` flattens each
- * page's array into newline-delimited JSON we parse line by line.
+ * page's array into newline-delimited JSON we parse line by line. `T` is the
+ * caller's claim about the element shape — this is the process's one untyped
+ * boundary, so the raw types in `issues.ts` keep the claim to fields we read.
  */
-async function ghList(path: string): Promise<any[]> {
+async function ghList<T>(path: string): Promise<T[]> {
   const out = await sh(["gh", "api", path, "--paginate", "--jq", ".[]"]);
   return out
     .split("\n")
     .filter((line) => line.trim())
-    .map((line) => JSON.parse(line));
+    .map((line) => JSON.parse(line) as T);
 }
 
-function toSubIssue(raw: any): SubIssue {
-  const blockedBy: number = raw.issue_dependencies_summary?.blocked_by ?? 0;
-  const state: IssueState = raw.state === "closed" ? "closed" : "open";
-  return {
-    number: raw.number,
-    title: raw.title,
-    state,
-    blockedBy,
-    unblocked: state === "open" && blockedBy === 0,
-    assignees: (raw.assignees ?? []).map((a: any) => a.login),
-    labels: (raw.labels ?? []).map((l: any) => l?.name).filter(Boolean),
-    url: raw.html_url,
+/**
+ * How many `gh` calls may be in flight at once. Every sub-issue now costs a
+ * call, so a busy map would otherwise fan out to dozens of concurrent
+ * subprocesses in one burst — which GitHub's secondary rate limits punish and
+ * the OS pays for. Results stay in input order.
+ */
+const POOL = 8;
+
+async function mapPooled<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (let i = next++; i < items.length; i = next++) out[i] = await fn(items[i]!);
   };
+  await Promise.all(Array.from({ length: Math.min(POOL, items.length) }, worker));
+  return out;
 }
 
 /**
@@ -98,7 +92,7 @@ export async function readFrontier(repo: string): Promise<WayfinderMap[]> {
  * and wants the canonical name for other purposes (e.g. sync identity keys).
  */
 export async function readFrontierFor(canonical: string): Promise<WayfinderMap[]> {
-  const rawMaps = await ghList(
+  const rawMaps = await ghList<RawMapIssue>(
     `repos/${canonical}/issues?state=open&labels=${MAP_LABEL}&per_page=100`,
   );
   // The issues listing can include pull requests; the label filter already
@@ -107,8 +101,22 @@ export async function readFrontierFor(canonical: string): Promise<WayfinderMap[]
 
   return Promise.all(
     maps.map(async (m): Promise<WayfinderMap> => {
-      const rawSubs = await ghList(`repos/${canonical}/issues/${m.number}/sub_issues?per_page=100`);
-      const subIssues = rawSubs.map(toSubIssue).sort((a, b) => a.number - b.number);
+      const rawSubs = await ghList<RawSubIssue>(
+        `repos/${canonical}/issues/${m.number}/sub_issues?per_page=100`,
+      );
+      // One `blocked_by` call per sub-issue — the pass's only per-ticket cost.
+      const subIssues = (
+        await mapPooled(rawSubs, async (raw) =>
+          toSubIssue(
+            raw,
+            toBlockerNumbers(
+              await ghList<RawBlocker>(
+                `repos/${canonical}/issues/${raw.number}/dependencies/blocked_by`,
+              ),
+            ),
+          ),
+        )
+      ).sort((a, b) => a.number - b.number);
       return {
         number: m.number,
         title: m.title,
@@ -137,7 +145,8 @@ if (import.meta.main) {
         const mark = s.state === "closed" ? "✓" : s.unblocked ? "→" : "·";
         const blocked = s.state === "open" && s.blockedBy > 0 ? ` (blocked_by ${s.blockedBy})` : "";
         const claimed = s.assignees.length ? ` @${s.assignees.join(",@")}` : "";
-        console.log(`    ${mark} #${s.number} ${s.title}${blocked}${claimed}`);
+        const waits = s.blockers.length ? ` ⟵ ${s.blockers.map((b) => `#${b}`).join(" ")}` : "";
+        console.log(`    ${mark} #${s.number} ${s.title}${blocked}${claimed}${waits}`);
       }
       console.log(
         `    frontier: ${map.frontier.length ? map.frontier.map((s) => `#${s.number}`).join(" ") : "(empty)"}`,

@@ -13,7 +13,7 @@
  * which workspaces (dead maps + stray group anchors) to close.
  */
 
-import type { SubIssue, WayfinderMap } from "./frontier.ts";
+import type { SubIssue, WayfinderMap } from "./issues.ts";
 
 // ---------- identity keys & formatters ----------
 
@@ -140,6 +140,17 @@ export function mapTabTitle(mapNumber: number): string {
   return `map #${mapNumber}`;
 }
 
+/**
+ * Title of the map's lanes-board browser tab — the second enforced tab, pinned
+ * directly right of {@link mapTabTitle}. Like it, the title is a marker the
+ * managed-ticket-tab matcher ignores, and it is what the generated page carries
+ * as its static `<title>` (sync's rename owns the tab title; the page never
+ * mutates `document.title`, so the two owners never fight).
+ */
+export function lanesTabTitle(mapNumber: number): string {
+  return `lanes #${mapNumber}`;
+}
+
 /** Worktree name passed to `claude --worktree` (claude sanitizes `/`→`+`). */
 export function worktreeName(mapNumber: number, ticket: number): string {
   return `wayfinder/${mapNumber}/${ticket}`;
@@ -166,8 +177,11 @@ export function ticketPrompt(mapNumber: number, ticket: number): string {
 
 export type TicketType = "grilling" | "task" | "research" | "prototype";
 
-/** X slot — one emoji per `wayfinder:<type>` ticket-type label. */
-const TYPE_EMOJI: Record<TicketType, string> = {
+/**
+ * X slot — one emoji per `wayfinder:<type>` ticket-type label. The lanes board
+ * embeds this table so its modal badges a ticket exactly like its tab does.
+ */
+export const TYPE_EMOJI: Record<TicketType, string> = {
   grilling: "🗣️",
   task: "🔨",
   research: "🔎",
@@ -177,7 +191,7 @@ const TYPE_EMOJI: Record<TicketType, string> = {
 /** Y slot — whose turn the tab is waiting on; ✓ takes the slot once closed. */
 export const READY_FOR_HUMAN = "🫵";
 export const READY_FOR_AGENT = "🤖";
-const DONE = "✓";
+export const DONE = "✓";
 /** What may occupy the Y slot of a managed tab title. */
 type YSlot = typeof READY_FOR_HUMAN | typeof READY_FOR_AGENT | typeof DONE;
 
@@ -204,12 +218,17 @@ export function readinessOf(labels: string[]): typeof READY_FOR_HUMAN | typeof R
   return READY_FOR_HUMAN;
 }
 
+/** The X-slot emoji for a ticket's labels — the type badge tabs and the board share. */
+export function typeEmojiOf(labels: string[]): string {
+  return TYPE_EMOJI[ticketTypeOf(labels)];
+}
+
 /**
  * Managed ticket tab title: `[XY]<n>` — X the ticket-type emoji, Y the
  * readiness emoji (🫵 human / 🤖 agent), replaced by ✓ once the ticket closes.
  */
 export function ticketTabTitle(ticket: number, labels: string[], readiness: YSlot): string {
-  return `[${TYPE_EMOJI[ticketTypeOf(labels)]}${readiness}]${ticket}`;
+  return `[${typeEmojiOf(labels)}${readiness}]${ticket}`;
 }
 
 /** The title a managed tab should carry for `sub`'s current state and labels. */
@@ -455,4 +474,57 @@ export function planWorkspacePrune(
     }
   }
   return closes;
+}
+
+// ---------- board cache files (pure) ----------
+
+/** The cache root every repo's board directory lives under. */
+export function boardCacheDir(home: string): string {
+  return `${home}/.cache/cmux-wayfinder`;
+}
+
+/**
+ * `~/.cache/cmux-wayfinder/<owner>-<repo>/<map>.html` — one file per map, under
+ * a per-repo directory, outside every checkout.
+ */
+export function boardPath(home: string, canonicalRepo: string, mapNumber: number): string {
+  return `${boardCacheDir(home)}/${canonicalRepo.replace(/\//g, "-")}/${mapNumber}.html`;
+}
+
+/** `file://` URL for an absolute path, with each segment percent-escaped. */
+export function fileUrl(absPath: string): string {
+  return `file://${absPath.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/**
+ * Decide which cache board files `--prune` should delete (ticket #11): every
+ * `.html` file under {@link boardCacheDir} that no desired map backs.
+ *
+ * `existingPaths` is everything sync found under the cache root, unfiltered —
+ * picking the board files out of it is this function's job, so the rule lives
+ * in one tested place. Only `.html` is a candidate, so a crashed write's
+ * `…html.<pid>.tmp` leftover (and anything else sharing the directory) is never
+ * our business.
+ *
+ * `desiredDescriptions` is the same `owner/repo#map` set {@link planWorkspacePrune}
+ * takes — sync fills it from every tracked repo's *open* maps during the
+ * additive pass, so "not desired" covers both a map that closed and a repo
+ * dropped from `tracked.yaml`. Each one is mapped forward through
+ * {@link boardPath} rather than parsing filenames back into repos: the
+ * `owner/repo` → `owner-repo` directory name is lossy, and comparing generated
+ * paths cannot mistake one repo for another.
+ *
+ * Output is sorted so the run's log reads the same way twice.
+ */
+export function planBoardPrune(
+  home: string,
+  existingPaths: string[],
+  desiredDescriptions: Iterable<string>,
+): string[] {
+  const keep = new Set<string>();
+  for (const description of desiredDescriptions) {
+    const ref = parseWorkspaceDescription(description);
+    if (ref) keep.add(boardPath(home, ref.repo, ref.mapNumber));
+  }
+  return existingPaths.filter((p) => p.endsWith(".html") && !keep.has(p)).sort();
 }
