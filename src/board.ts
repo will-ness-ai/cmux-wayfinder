@@ -21,6 +21,7 @@ import {
   DONE,
   lanesTabTitle,
   mapLabel,
+  parseWorkspaceDescription,
   readinessOf,
   ticketTypeOf,
   TYPE_EMOJI,
@@ -189,13 +190,46 @@ export function boardPayload(input: BoardInput): BoardPayload {
 
 // ---------- cache file location ----------
 
+/** The cache root every repo's board directory lives under. */
+export function boardCacheDir(home: string): string {
+  return `${home}/.cache/cmux-wayfinder`;
+}
+
 /**
  * `~/.cache/cmux-wayfinder/<owner>-<repo>/<map>.html` — one file per map, under
  * a per-repo directory, outside every checkout.
  */
 export function boardPath(home: string, canonicalRepo: string, mapNumber: number): string {
-  const dir = `${home}/.cache/cmux-wayfinder/${canonicalRepo.replace(/\//g, "-")}`;
-  return `${dir}/${mapNumber}.html`;
+  return `${boardCacheDir(home)}/${canonicalRepo.replace(/\//g, "-")}/${mapNumber}.html`;
+}
+
+/**
+ * Decide which cache board files `--prune` should delete (ticket #11): every
+ * `.html` file found under {@link boardCacheDir} that no desired map backs.
+ *
+ * `desiredDescriptions` is the same `owner/repo#map` set the workspace prune
+ * takes (`planWorkspacePrune` in `plan.ts`) — sync fills it from every tracked
+ * repo's *open* maps during the additive pass, so "not desired" covers both a
+ * map that closed and a repo dropped from `tracked.yaml`. Each one is mapped
+ * forward through {@link boardPath} rather than parsing filenames back into
+ * repos: the `owner/repo` → `owner-repo` directory name is lossy, and comparing
+ * generated paths cannot mistake one repo for another.
+ *
+ * Only `.html` is a candidate, so a crashed write's `…html.<pid>.tmp` leftover
+ * (and anything else sharing the directory) is never our business. Output is
+ * sorted so the run's log reads the same way twice.
+ */
+export function planBoardPrune(
+  home: string,
+  existingFiles: string[],
+  desiredDescriptions: Iterable<string>,
+): string[] {
+  const keep = new Set<string>();
+  for (const description of desiredDescriptions) {
+    const ref = parseWorkspaceDescription(description);
+    if (ref) keep.add(boardPath(home, ref.repo, ref.mapNumber));
+  }
+  return existingFiles.filter((f) => f.endsWith(".html") && !keep.has(f)).sort();
 }
 
 /** `file://` URL for an absolute path, with each segment percent-escaped. */

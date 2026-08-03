@@ -56,7 +56,7 @@ Tab titles are `[XY]<ticket#>`:
   defaults HITL → 🫵. ✓ takes the slot once the ticket closes. Legacy
   `<n>`/`✓<n>` tabs upgrade to the bracketed form on the next run.
 
-Sync is additive + rename-only by default (closed tickets → `[X✓]<n>` tabs); nothing is closed without `--prune`.
+Sync is additive + rename-only by default (closed tickets → `[X✓]<n>` tabs); nothing is closed or deleted without `--prune`.
 
 ## Usage
 
@@ -65,7 +65,7 @@ bun install
 cp tracked.example.yaml tracked.yaml   # then edit for your repos + local paths
 bun src/sync.ts --dry-run     # print the plan, touch nothing
 bun src/sync.ts               # materialize into live cmux (additive + rename-only)
-bun src/sync.ts --prune       # also close stale tabs / dead-map workspaces
+bun src/sync.ts --prune       # also close stale tabs / dead-map workspaces + delete their boards
 bun src/sync.ts --config path/to/tracked.yaml
 bun src/sync.ts --watch       # re-sync every 30s until killed
 bun src/sync.ts --watch 120   # ... every 120s
@@ -98,8 +98,8 @@ Workspace creation uses the v1 `cmux new-workspace` CLI (the only path that
 honors title/cwd/description/group at creation); everything else goes over the
 v2 `cmux rpc` socket.
 
-`--prune` is the only path that ever closes anything (never the default). It
-runs a normal additive sync first, then closes:
+`--prune` is the only path that ever closes or deletes anything (never the
+default). It runs a normal additive sync first, then closes:
 - **done/stale ticket tabs** — a managed `[XY]<n>` (or legacy `<n>`/`✓<n>`) tab
   whose ticket is no longer open (closed, or dropped from the map). A ticket
   that is still open but
@@ -111,8 +111,13 @@ runs a normal additive sync first, then closes:
   behind (identified by `group.anchor_workspace_id`); emptying a group then
   auto-removes it.
 
+It then deletes the **stale lanes-board files**: every `.html` under
+`~/.cache/cmux-wayfinder/` that no open, tracked map backs — the boards of maps
+that closed and of repos that left `tracked.yaml`. A live map's board is never
+touched, and nothing else sharing that directory is a candidate.
+
 Pair it with `--dry-run` first (`bun src/sync.ts --prune --dry-run`) to see
-exactly what would close. Because `--prune` can close the workspace you're
+exactly what would close and what would be deleted. Because `--prune` can close the workspace you're
 sitting in, it may move your cmux selection — expected under prune only.
 
 Known v1 limitations:

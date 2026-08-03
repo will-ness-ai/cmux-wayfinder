@@ -1,5 +1,6 @@
 import { expect, test, describe } from "bun:test";
 import {
+  boardCacheDir,
   boardPath,
   boardPayload,
   dependentsOf,
@@ -10,6 +11,7 @@ import {
   LANE_ORDER,
   MD_SOURCE,
   partitionLanes,
+  planBoardPrune,
   renderBoard,
   type BoardInput,
   type BoardPayload,
@@ -442,6 +444,63 @@ describe("cache file location", () => {
       "file:///Users/ann/.cache/cmux-wayfinder/acme-example/101.html",
     );
     expect(fileUrl("/Users/an n/x.html")).toBe("file:///Users/an%20n/x.html");
+  });
+});
+
+describe("board-file prune", () => {
+  const HOME = "/Users/ann";
+  const board = (repo: string, map: number) => boardPath(HOME, repo, map);
+  const desired = (...pairs: [string, number][]) =>
+    new Set(pairs.map(([repo, map]) => `${repo}#${map}`));
+
+  test("the cache root holds every repo's board directory", () => {
+    expect(boardCacheDir(HOME)).toBe("/Users/ann/.cache/cmux-wayfinder");
+    expect(board("acme/example", 101).startsWith(`${boardCacheDir(HOME)}/`)).toBe(true);
+  });
+
+  test("deletes the board of a map that is no longer desired", () => {
+    const files = [board("acme/example", 101), board("acme/example", 102)];
+    expect(planBoardPrune(HOME, files, desired(["acme/example", 101]))).toEqual([
+      board("acme/example", 102),
+    ]);
+  });
+
+  test("deletes the boards of a repo that is no longer tracked", () => {
+    const files = [board("acme/example", 101), board("other/repo", 7)];
+    expect(planBoardPrune(HOME, files, desired(["acme/example", 101]))).toEqual([
+      board("other/repo", 7),
+    ]);
+  });
+
+  test("keeps every desired map's board, deletes nothing else when all are backed", () => {
+    const files = [board("acme/example", 101), board("other/repo", 7)];
+    expect(planBoardPrune(HOME, files, desired(["acme/example", 101], ["other/repo", 7]))).toEqual(
+      [],
+    );
+  });
+
+  test("no desired maps at all means every board file goes", () => {
+    const files = [board("acme/example", 101), board("other/repo", 7)];
+    expect(planBoardPrune(HOME, files, new Set())).toEqual(files.slice().sort());
+  });
+
+  test("only board files are candidates — other cache junk is left alone", () => {
+    const files = [
+      `${boardCacheDir(HOME)}/acme-example/101.html.4242.tmp`,
+      `${boardCacheDir(HOME)}/acme-example/notes.txt`,
+      board("acme/example", 101),
+    ];
+    expect(planBoardPrune(HOME, files, new Set())).toEqual([board("acme/example", 101)]);
+  });
+
+  test("descriptions that aren't ours back no file (and so keep nothing alive)", () => {
+    const files = [board("acme/example", 101)];
+    expect(planBoardPrune(HOME, files, new Set(["not-a-description"]))).toEqual(files);
+  });
+
+  test("deletions come out in a stable order", () => {
+    const files = [board("b/two", 2), board("a/one", 1)];
+    expect(planBoardPrune(HOME, files, new Set())).toEqual([board("a/one", 1), board("b/two", 2)]);
   });
 });
 

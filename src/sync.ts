@@ -9,24 +9,32 @@
  *     browser tabs — the map issue and the generated lanes board (#8).
  *
  * Default path is additive + rename-only: never closes a workspace/tab, never
- * moves focus. `--prune` additionally closes done/stale ticket tabs and the
- * workspaces of closed/untracked maps (plus stray group anchors) — the only
- * path that ever closes anything. `--dry-run` prints the plan without touching
- * cmux. `--watch [sec]` re-syncs every `sec` seconds (default 30) until killed,
- * with GitHub rate-budget guardrails (see `watch`).
+ * moves focus, never deletes a file. `--prune` additionally closes done/stale
+ * ticket tabs and the workspaces of closed/untracked maps (plus stray group
+ * anchors), and deletes the cached board files those dead maps left behind
+ * (#11) — the only path that ever removes anything. `--dry-run` prints the plan
+ * without touching cmux or disk. `--watch [sec]` re-syncs every `sec` seconds
+ * (default 30) until killed, with GitHub rate-budget guardrails (see `watch`).
  *
  *   bun src/sync.ts [--config tracked.yaml] [--dry-run] [--prune] [--watch [sec]]
  */
 
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { sh } from "./proc.ts";
 import { loadTracked, type TrackedRepo } from "./config.ts";
 import { blockedByEdges, readFrontierFor, resolveRepo, type WayfinderMap } from "./frontier.ts";
 import * as cmux from "./cmux.ts";
-import { boardPath, fileUrl, formatGeneratedAt, renderBoard } from "./board.ts";
+import {
+  boardCacheDir,
+  boardPath,
+  fileUrl,
+  formatGeneratedAt,
+  planBoardPrune,
+  renderBoard,
+} from "./board.ts";
 import {
   groupName,
   isManagedWorkspaceTitle,
@@ -335,12 +343,21 @@ function fmtFrontier(map: WayfinderMap): string {
 // ---------- entry ----------
 
 /**
- * `--prune` tail pass: close every workspace that isn't backed by a tracked
- * open map (dead/untracked maps) plus the stray group anchors. Runs after the
- * additive pass has created all desired workspaces and populated `desired`, so
- * "not desired" is unambiguous. Emptied groups auto-remove themselves.
+ * `--prune` tail pass, in two halves: the workspaces cmux still shows, then the
+ * board files left in the cache. Both run after the additive pass has created
+ * all desired workspaces and populated `desired`, so "not desired" is
+ * unambiguous.
  */
 async function prune(desired: Set<string>, opts: Options, log: Logger) {
+  await pruneWorkspaces(desired, opts, log);
+  await pruneBoards(desired, opts, log);
+}
+
+/**
+ * Close every workspace that isn't backed by a tracked open map (dead/untracked
+ * maps) plus the stray group anchors. Emptied groups auto-remove themselves.
+ */
+async function pruneWorkspaces(desired: Set<string>, opts: Options, log: Logger) {
   const [snap, groups] = await Promise.all([cmux.snapshot(), cmux.listGroups()]);
   const closes = planWorkspacePrune(snap.workspaces, groups, desired);
   if (closes.length === 0) {
@@ -353,6 +370,43 @@ async function prune(desired: Set<string>, opts: Options, log: Logger) {
     log.act(`close workspace "${c.title}" (${label})`);
     if (!opts.dryRun) await cmux.closeWorkspace(c.id);
   }
+}
+
+/**
+ * Delete the generated board files no desired map backs — a closed map's board
+ * and every board of a repo dropped from `tracked.yaml`. The decision is pure
+ * ({@link planBoardPrune}); this half only walks the cache and unlinks. The
+ * empty repo directory a dropped repo leaves behind is left in place — it costs
+ * nothing and the next pass for that repo would just recreate it.
+ */
+async function pruneBoards(desired: Set<string>, opts: Options, log: Logger) {
+  const home = homedir();
+  const deletes = planBoardPrune(home, await listBoardFiles(boardCacheDir(home)), desired);
+  if (deletes.length === 0) {
+    log.info(`prune: no stale board files`);
+    return;
+  }
+  log.info(`prune: deleting ${deletes.length} board file(s)`);
+  for (const path of deletes) {
+    log.act(`delete board ${path}`);
+    if (!opts.dryRun) await rm(path, { force: true });
+  }
+}
+
+/**
+ * Every `.html` file under the board cache root, as absolute paths. A cache
+ * directory that doesn't exist yet (nothing generated on this machine) reads as
+ * no files; any other read error is a real problem and propagates.
+ */
+async function listBoardFiles(root: string): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(root, { recursive: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw e;
+  }
+  return entries.filter((e) => e.endsWith(".html")).map((e) => join(root, e));
 }
 
 /**
