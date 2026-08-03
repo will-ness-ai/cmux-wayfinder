@@ -47,7 +47,11 @@ export interface BoardMap {
 export interface BoardInput {
   map: BoardMap;
   tickets: BoardTicket[];
-  /** Keyed by ticket number → its in-map blocker numbers (ticket #9 fills this). */
+  /**
+   * Keyed by ticket number → its blocker numbers, open or closed, as GitHub
+   * reports them. Refs to issues outside the map are dropped here (see
+   * {@link inMapEdges}) — the board only draws edges it can point at.
+   */
   edges: Record<string, number[]>;
   /** Human-facing freshness stamp, e.g. `Aug 2 at 1:00 PM`. */
   generatedAt: string;
@@ -92,6 +96,42 @@ export function partitionLanes(tickets: BoardTicket[]): Record<Lane, BoardTicket
   return lanes;
 }
 
+// ---------- dependency edges ----------
+
+/**
+ * The blocked-by edges restricted to this map: both ends of every edge must be
+ * a ticket on the board, since a chip the reader cannot click is noise. Lane
+ * placement keeps using {@link BoardTicket.blockedBy}, GitHub's true open-blocker
+ * count, so a ticket can sit in Blocked with no chip at all — that is the honest
+ * rendering of "blocked by something you cannot see from here".
+ */
+export function inMapEdges(
+  tickets: BoardTicket[],
+  edges: Record<string, number[]>,
+): Record<string, number[]> {
+  const inMap = new Set(tickets.map((t) => t.number));
+  const kept: Record<string, number[]> = {};
+  for (const [n, blockers] of Object.entries(edges)) {
+    if (!inMap.has(Number(n))) continue;
+    kept[n] = blockers.filter((b) => inMap.has(b));
+  }
+  return kept;
+}
+
+/**
+ * The other direction of the same edges: ticket → the tickets it unblocks.
+ * Never fetched — GitHub's dependents listing would cost another call per
+ * ticket, and inverting what we already have is exact.
+ */
+export function dependentsOf(edges: Record<string, number[]>): Record<string, number[]> {
+  const deps: Record<string, number[]> = {};
+  for (const [n, blockers] of Object.entries(edges)) {
+    for (const b of blockers) (deps[String(b)] ??= []).push(Number(n));
+  }
+  for (const list of Object.values(deps)) list.sort((a, b) => a - b);
+  return deps;
+}
+
 // ---------- embedded payload ----------
 
 export interface PayloadTicket {
@@ -131,8 +171,7 @@ export function boardPayload(input: BoardInput): BoardPayload {
       lane: laneOf(t),
     };
   }
-  const edges: Record<string, number[]> = {};
-  for (const [n, blockers] of Object.entries(input.edges)) edges[n] = [...blockers];
+  const edges = inMapEdges(input.tickets, input.edges);
   return { map: { ...input.map }, tickets, edges, generatedAt: input.generatedAt };
 }
 
@@ -195,30 +234,60 @@ function statStrip(lanes: Record<Lane, BoardTicket[]>): string {
   return `<div class="strip">${cards}</div>`;
 }
 
-function row(t: BoardTicket, lane: Lane, collapsed: boolean): string {
+/**
+ * The edge structure a row needs: who it waits on (rendered as chips, each
+ * red or grey-struck by its blocker's state) and who it unblocks (carried as
+ * an attribute for the page's spotlight — the chips already carry the other
+ * direction, so neither list is stored twice).
+ */
+interface Edges {
+  blockers: Record<string, number[]>;
+  dependents: Record<string, number[]>;
+  stateOf: (n: number) => IssueState;
+}
+
+function waitCell(t: BoardTicket, edges: Edges): string {
+  const chips = (edges.blockers[String(t.number)] ?? []).map((b) => {
+    const historical = edges.stateOf(b) === "closed";
+    return `<span class="wref${historical ? " hist" : ""}" data-ref="${b}">#${b}</span>`;
+  });
+  return `<td class="wait">${chips.join("")}</td>`;
+}
+
+function row(t: BoardTicket, lane: Lane, collapsed: boolean, edges: Edges): string {
   const done = t.state === "closed";
   const cls = `t${done ? " done" : ""}${collapsed ? " hidden-lane" : ""}`;
   const who = !done && t.assignees.length ? `@${esc(t.assignees[0]!)}` : "";
+  const dependents = edges.dependents[String(t.number)] ?? [];
+  const dep = dependents.length ? ` data-dep="${dependents.join(",")}"` : "";
   return (
-    `<tr class="${cls}" data-t="${t.number}" data-lane="${lane}">` +
+    `<tr class="${cls}" data-t="${t.number}" data-lane="${lane}"${dep}>` +
     `<td class="num">#${t.number}</td>` +
     `<td class="emo">${typeEmojiOf(t.labels)}${done ? DONE : readinessOf(t.labels)}</td>` +
     `<td class="title">${esc(t.title)}</td>` +
     `<td class="who">${who}</td>` +
+    waitCell(t, edges) +
     `</tr>`
   );
 }
 
-function laneSection(lane: Lane, tickets: BoardTicket[]): string {
+function laneSection(lane: Lane, tickets: BoardTicket[], edges: Edges): string {
   // Resolved starts collapsed so finished work never crowds the live work.
   const collapsed = lane === "resolved";
   return (
-    `<tr class="sec sec-${lane}" data-sec="${lane}"><td colspan="4">` +
+    `<tr class="sec sec-${lane}" data-sec="${lane}"><td colspan="5">` +
     `<span class="chev">${collapsed ? CHEV_COLLAPSED : CHEV_OPEN}</span>${LANE_NAME[lane]}` +
     `<span class="cnt">${tickets.length}</span></td></tr>` +
-    tickets.map((t) => row(t, lane, collapsed)).join("")
+    tickets.map((t) => row(t, lane, collapsed, edges)).join("")
   );
 }
+
+/** The two spotlight colors, spelled out so nobody has to memorize them. */
+const LEGEND =
+  `<div class="legend">` +
+  `<span class="l-blk"><i></i>waits on (blockers)</span>` +
+  `<span class="l-dep"><i></i>unblocks (dependents)</span>` +
+  `</div>`;
 
 /** The whole board: one self-contained HTML page, ready to write to disk. */
 export function renderBoard(input: BoardInput): string {
@@ -227,9 +296,17 @@ export function renderBoard(input: BoardInput): string {
   const counts = LANE_ORDER.map(
     (l) => `<span class="m-cnt c-${l}">${lanes[l].length} ${LANE_NAME[l].toLowerCase()}</span>`,
   ).join(" · ");
+  const blockers = inMapEdges(input.tickets, input.edges);
+  const byNumber = new Map(input.tickets.map((t) => [t.number, t]));
+  const edges: Edges = {
+    blockers,
+    dependents: dependentsOf(blockers),
+    // Every ref survived inMapEdges, so every lookup here hits.
+    stateOf: (n) => byNumber.get(n)!.state,
+  };
   // Empty lanes are hidden from the table (the strip still shows their zero).
   const sections = LANE_ORDER.filter((l) => lanes[l].length > 0)
-    .map((l) => laneSection(l, lanes[l]))
+    .map((l) => laneSection(l, lanes[l], edges))
     .join("");
   const mapLink =
     `<a href="${esc(input.map.url)}" target="_blank" rel="noopener">` +
@@ -249,9 +326,10 @@ ${STYLES}
 <div id="stage"><div class="v-classic">
 <div class="board-title">${mapLink}</div>
 <div class="board-sub">${counts} · generated ${esc(input.generatedAt)}</div>
+${LEGEND}
 ${statStrip(lanes)}
 <div class="grid-wrap"><table>
-<thead><tr><th>#</th><th>Type</th><th>Title</th><th>Assignee</th></tr></thead>
+<thead><tr><th>#</th><th>Type</th><th>Title</th><th>Assignee</th><th>Waiting on</th></tr></thead>
 <tbody>${sections}</tbody>
 </table></div>
 </div></div>
@@ -267,7 +345,8 @@ ${pageScript(input.map.number)}
 /**
  * The page's own behaviour: collapsible lane sections (persisted best-effort in
  * localStorage, degrading silently to the generated defaults when `file://`
- * storage is unavailable) and the fallback reload timer.
+ * storage is unavailable), the two-way dependency spotlight, chip jumps, and
+ * the fallback reload timer.
  *
  * The webview does not watch files, so a board whose rpc reload was skipped or
  * failed would otherwise sit stale — this timer is the self-heal. Written as
@@ -278,7 +357,9 @@ function pageScript(mapNumber: number): string {
   return `(function () {
   var KEY = "cmux-wayfinder:lanes:${mapNumber}";
   var stage = document.getElementById("stage");
+  var table = stage.querySelector("table");
 
+  function rowOf(n) { return stage.querySelector('tr.t[data-t="' + n + '"]'); }
   function rowsOf(lane) { return document.querySelectorAll('tr.t[data-lane="' + lane + '"]'); }
   function lanes() { return Array.prototype.map.call(document.querySelectorAll("tr.sec"), function (s) { return s.dataset.sec; }); }
 
@@ -292,6 +373,9 @@ function pageScript(mapNumber: number): string {
     var rows = rowsOf(lane);
     return rows.length > 0 && rows[0].classList.contains("hidden-lane");
   }
+  function remember() {
+    try { localStorage.setItem(KEY, JSON.stringify(lanes().filter(isCollapsed))); } catch (e) {}
+  }
 
   try {
     var saved = localStorage.getItem(KEY);
@@ -301,12 +385,74 @@ function pageScript(mapNumber: number): string {
     }
   } catch (e) { /* no storage on file:// — keep the generated defaults */ }
 
+  // ---- two-way spotlight: dim the board, keep the row's edges lit ----
+
+  var FX = ["fx-keep", "fx-src", "fx-blk", "fx-dep"];
+
+  function clearFx() {
+    var marked = stage.querySelectorAll(".fx-keep, .fx-src, .fx-blk, .fx-dep");
+    for (var i = 0; i < marked.length; i++) marked[i].classList.remove.apply(marked[i].classList, FX);
+    if (table) table.classList.remove("fx-on");
+  }
+
+  function spotlight(src, pairs) {
+    // Nothing to relate to: leave the board undimmed rather than dim it all.
+    if (!table || !pairs.length) return;
+    table.classList.add("fx-on");
+    if (src) src.classList.add("fx-src", "fx-keep");
+    pairs.forEach(function (p) { p.row.classList.add(p.cls, "fx-keep"); });
+  }
+
+  /** The rows a row waits on (from its chips) and the rows it unblocks. */
+  function relatedOf(tr) {
+    var pairs = [];
+    var chips = tr.querySelectorAll(".wref");
+    for (var i = 0; i < chips.length; i++) {
+      var blocker = rowOf(chips[i].dataset.ref);
+      if (blocker) pairs.push({ row: blocker, cls: "fx-blk" });
+    }
+    var dep = tr.dataset.dep ? tr.dataset.dep.split(",") : [];
+    dep.forEach(function (n) {
+      var row = rowOf(n);
+      if (row) pairs.push({ row: row, cls: "fx-dep" });
+    });
+    return pairs;
+  }
+
+  stage.addEventListener("mouseover", function (e) {
+    clearFx();
+    var chip = e.target.closest(".wref");
+    if (chip) {
+      var blocker = rowOf(chip.dataset.ref);
+      if (blocker) spotlight(chip.closest("tr.t"), [{ row: blocker, cls: "fx-blk" }]);
+      return;
+    }
+    var tr = e.target.closest("tr.t");
+    if (tr) spotlight(tr, relatedOf(tr));
+  });
+  stage.addEventListener("mouseleave", clearFx);
+
+  // ---- clicks: chips jump along an edge, section headers toggle a lane ----
+
   stage.addEventListener("click", function (e) {
+    var chip = e.target.closest(".wref");
+    if (chip) {
+      var row = rowOf(chip.dataset.ref);
+      if (!row) return;
+      // A blocker parked in a collapsed lane (Resolved, usually) has to come
+      // back into view before scrolling to it means anything.
+      if (row.classList.contains("hidden-lane")) { setLane(row.dataset.lane, false); remember(); }
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.remove("flash");
+      void row.offsetWidth; // restart the animation on a repeat click
+      row.classList.add("flash");
+      return;
+    }
     var sec = e.target.closest("tr.sec");
     if (!sec) return;
     var lane = sec.dataset.sec;
     setLane(lane, !isCollapsed(lane));
-    try { localStorage.setItem(KEY, JSON.stringify(lanes().filter(isCollapsed))); } catch (e2) {}
+    remember();
   });
 
   setInterval(function () { location.reload(); }, ${RELOAD_MS});
@@ -333,6 +479,11 @@ const STYLES = `  * { box-sizing: border-box; }
   .v-classic .board-sub .m-cnt.c-frontier { color: #1a7f37; }
   .v-classic .board-sub .m-cnt.c-inprogress { color: #205a9e; }
   .v-classic .board-sub .m-cnt.c-resolved { color: #6e7781; }
+  .v-classic .legend { display: flex; gap: 14px; margin: 0 0 10px; font-size: 11px; color: #6e7781; }
+  .v-classic .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+    margin-right: 5px; vertical-align: -1px; font-style: normal; }
+  .v-classic .legend .l-blk i { background: #fff3cd; border: 1px solid #e8d48a; }
+  .v-classic .legend .l-dep i { background: #e3f0fd; border: 1px solid #a9cdf4; }
 
   .v-classic .strip { display: flex; gap: 10px; margin: 0 0 16px; flex-wrap: wrap; }
   .v-classic .stat { border-radius: 8px; padding: 8px 14px 7px; min-width: 104px;
@@ -369,4 +520,27 @@ const STYLES = `  * { box-sizing: border-box; }
   .v-classic td.num { color: #6e7781; width: 56px; }
   .v-classic td.emo { width: 52px; }
   .v-classic tr.done td.title { color: #8b949e; text-decoration: line-through; }
-  .v-classic td.who { width: 120px; font-size: 12px; color: #205a9e; }`;
+  .v-classic td.who { width: 120px; font-size: 12px; color: #205a9e; }
+  .v-classic td.wait { width: 170px; font-size: 12px; }
+
+  /* waiting-on chips: red for a live blocker, grey-struck for a historical one */
+  .wref { display: inline-block; padding: 1px 7px; border-radius: 5px; margin: 0 2px 2px 0;
+    background: #ffe5e2; color: #b3372f; font-weight: 600; cursor: pointer;
+    transition: background 0.12s, transform 0.12s; }
+  .wref:hover { background: #f6b8b2; transform: translateY(-1px); }
+  .wref.hist { background: #eef0f3; color: #8a919b; font-weight: 400;
+    text-decoration: line-through; }
+  .wref.hist:hover { background: #dde1e6; }
+
+  /* chip click → jump + flash */
+  @keyframes rowflash { 0% { background: #ffd9a0; } 100% { background: transparent; } }
+  tr.flash td { animation: rowflash 1.4s ease-out; }
+
+  /* two-way spotlight: dim the rest, tint the related */
+  .v-classic table.fx-on tr.t:not(.fx-keep) td { opacity: 0.3; }
+  .v-classic table.fx-on tr.sec td { opacity: 0.5; }
+  .v-classic tr.fx-src.fx-keep td { background: #fff; }
+  .v-classic tr.fx-blk td { background: #fff3cd; }
+  .v-classic tr.fx-blk td.num { color: #8a6d1a; font-weight: 700; }
+  .v-classic tr.fx-dep td { background: #e3f0fd; }
+  .v-classic tr.fx-dep td.num { color: #205a9e; font-weight: 700; }`;

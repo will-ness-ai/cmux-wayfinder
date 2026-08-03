@@ -24,7 +24,7 @@ import { dirname } from "node:path";
 
 import { sh } from "./proc.ts";
 import { loadTracked, type TrackedRepo } from "./config.ts";
-import { readFrontierFor, resolveRepo, type WayfinderMap } from "./frontier.ts";
+import { blockedByEdges, readFrontierFor, resolveRepo, type WayfinderMap } from "./frontier.ts";
 import * as cmux from "./cmux.ts";
 import { boardPath, fileUrl, formatGeneratedAt, renderBoard } from "./board.ts";
 import {
@@ -88,19 +88,21 @@ function makeLog(dryRun: boolean): Logger {
   };
 }
 
+/** Returns how many sub-issues the pass read — one API call each (see `watch`). */
 async function syncRepo(
   tracked: TrackedRepo,
   opts: Options,
   log: Logger,
   desired: Set<string>,
-) {
+): Promise<number> {
   const canonical = await resolveRepo(tracked.repo);
   const maps = await readFrontierFor(canonical);
   // Every open map is a workspace that *should* exist — record it so the prune
   // pass keeps it (and prunes everything else). Done even in dry-run.
   for (const map of maps) desired.add(workspaceDescription(canonical, map.number));
+  const subIssues = maps.reduce((n, m) => n + m.subIssues.length, 0);
   log.info(`\n${canonical}${canonical !== tracked.repo ? ` (was ${tracked.repo})` : ""} — ${maps.length} open map(s)`);
-  if (maps.length === 0) return;
+  if (maps.length === 0) return subIssues;
 
   const before = await cmux.snapshot();
   const preexistingIds = new Set(before.workspaces.map((w) => w.id));
@@ -117,6 +119,7 @@ async function syncRepo(
   for (const map of maps) {
     await syncMap({ canonical, cwd: tracked.path, map, group, opts, log });
   }
+  return subIssues;
 }
 
 async function syncMap(ctx: {
@@ -272,7 +275,7 @@ async function syncBoard(ctx: {
   const html = renderBoard({
     map: { number: map.number, title: map.title, url: map.url },
     tickets: map.subIssues,
-    edges: {},
+    edges: blockedByEdges(map.subIssues),
     generatedAt: formatGeneratedAt(new Date()),
   });
 
@@ -357,15 +360,19 @@ async function prune(desired: Set<string>, opts: Options, log: Logger) {
  * config edits between ticks. Returns the run's shape for the watch loop's
  * rate-budget estimate.
  */
-async function runSync(opts: Options, log: Logger): Promise<{ repos: number; maps: number }> {
+async function runSync(
+  opts: Options,
+  log: Logger,
+): Promise<{ repos: number; maps: number; subIssues: number }> {
   const tracked = await loadTracked(opts.configPath);
   const desired = new Set<string>();
+  let subIssues = 0;
   for (const repo of tracked) {
-    await syncRepo(repo, opts, log, desired);
+    subIssues += await syncRepo(repo, opts, log, desired);
   }
   if (opts.prune) await prune(desired, opts, log);
   console.log(opts.dryRun ? "\n(dry run — no changes made)" : "\nsync complete");
-  return { repos: tracked.length, maps: desired.size };
+  return { repos: tracked.length, maps: desired.size, subIssues };
 }
 
 /** GitHub's primary REST budget for an authenticated user token. */
@@ -390,11 +397,13 @@ async function rateLimitResetDelay(): Promise<number | null> {
 /**
  * `--watch`: sync forever, sleeping `watchSec` between the end of one pass and
  * the start of the next (runs never overlap). Rate-limit posture: a pass costs
- * ~2 GETs per repo (resolve + map list) + 1 per open map against the shared
- * 5,000/hr budget — at the default 30s cadence that's 120 × (2·repos + maps)
- * per hour, e.g. 3 repos / 6 maps ≈ 1,440/hr. We warn once if the projected
- * spend crosses half the budget, and a failed pass checks for exhaustion and
- * sleeps until the window resets instead of hammering.
+ * ~2 GETs per repo (resolve + map list) + 1 per open map (sub-issue listing) +
+ * 1 per sub-issue (its blocked-by listing, ticket #9) against the shared
+ * 5,000/hr budget — at the default 30s cadence that's 120 × (2·repos + maps +
+ * sub-issues) per hour, e.g. 3 repos / 6 maps / 40 tickets ≈ 6,240/hr, well
+ * over budget. We warn once if the projected spend crosses half the budget, and
+ * a failed pass checks for exhaustion and sleeps until the window resets
+ * instead of hammering.
  */
 async function watch(opts: Options, log: Logger) {
   log.info(`watching: syncing every ${opts.watchSec}s (ctrl-c to stop)`);
@@ -402,8 +411,8 @@ async function watch(opts: Options, log: Logger) {
   for (;;) {
     log.info(`\n── sync @ ${new Date().toLocaleTimeString()} ──`);
     try {
-      const { repos, maps } = await runSync(opts, log);
-      const perHour = Math.round((3600 / opts.watchSec!) * (2 * repos + maps));
+      const { repos, maps, subIssues } = await runSync(opts, log);
+      const perHour = Math.round((3600 / opts.watchSec!) * (2 * repos + maps + subIssues));
       if (!warnedBudget && perHour > GH_HOURLY_LIMIT / 2) {
         warnedBudget = true;
         log.info(

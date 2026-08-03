@@ -42,6 +42,7 @@ function sub(
     assignees: [],
     labels,
     url: `https://x/${number}`,
+    blockers: [],
   };
 }
 

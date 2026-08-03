@@ -34,7 +34,10 @@ Reads `tracked.yaml` (list of tracked repos + local checkout paths), discovers o
   Resolved). Also *enforced*. Each pass regenerates the file under
   `~/.cache/cmux-wayfinder/<owner>-<repo>/<map#>.html` and reloads the tab; the
   page also self-reloads every ~5s, so it never sits stale. It makes **zero
-  network calls**, so it renders for private repos too
+  network calls**, so it renders for private repos too. Rows carry
+  **waiting-on chips** (red = open blocker, grey-struck = closed one); hovering
+  a row dims the board and lights what it waits on amber and what it unblocks
+  blue, and clicking a chip jumps to that blocker's row
 - one **tab** per open+unblocked sub-issue (title `[XY]<ticket#>`): launches
   `claude --worktree wayfinder/<map#>/<ticket#>`, waits for the TUI, then types
   `/wayfinder map #<map#> work on ticket #<ticket#>` into the input box and
@@ -74,8 +77,11 @@ every group/workspace/tab it *would* create, without contacting cmux.
 `--watch [sec]` loops forever: sync, sleep `sec` seconds (default 30), repeat —
 runs never overlap, and `tracked.yaml` is re-read each pass. GitHub's budget is
 5,000 authenticated requests/hour (shared with everything else `gh` does on your
-token); a pass costs ~2 GETs per repo + 1 per open map, so 30s (120 passes/hr)
-is comfortable for typical setups — e.g. 3 repos / 6 maps ≈ 1,440/hr. The loop
+token); a pass costs ~2 GETs per repo + 1 per open map + 1 per sub-issue (its
+blocked-by list, which the board's chips are drawn from) — e.g. 3 repos / 6 maps
+/ 40 tickets ≈ 6,240/hr at 30s, over budget, where a 120s cadence lands at a
+comfortable ~1,560/hr. The per-ticket term dominates once a map fills up, so
+prefer a longer interval over a busy one. The loop
 warns if projected spend crosses half the budget, and on a failed pass it checks
 `gh api rate_limit` (a free endpoint) and sleeps until the window resets if the
 budget is exhausted.

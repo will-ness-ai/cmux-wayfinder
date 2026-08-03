@@ -2,7 +2,9 @@ import { expect, test, describe } from "bun:test";
 import {
   boardPath,
   boardPayload,
+  dependentsOf,
   fileUrl,
+  inMapEdges,
   laneOf,
   LANE_ORDER,
   partitionLanes,
@@ -116,7 +118,7 @@ describe("embedded payload", () => {
     });
   });
 
-  test("carries an edges field, empty until the dependency ticket fills it", () => {
+  test("carries the in-map blocked-by edges", () => {
     expect(payloadOf(renderBoard(input([ticket(1)]))).edges).toEqual({});
     const withEdges = payloadOf(renderBoard(input([ticket(1), ticket(2)], { edges: { 2: [1] } })));
     expect(withEdges.edges).toEqual({ "2": [1] });
@@ -208,14 +210,15 @@ describe("the rendered board", () => {
 
   test("Resolved starts collapsed; the live lanes start open", () => {
     const html = renderBoard(input(tickets));
-    expect(html).toMatch(/data-sec="resolved"><td colspan="4">\s*<span class="chev">▸<\/span>/);
-    expect(html).toMatch(/data-sec="inprogress"><td colspan="4">\s*<span class="chev">▾<\/span>/);
+    expect(html).toMatch(/data-sec="resolved"><td colspan="5">\s*<span class="chev">▸<\/span>/);
+    expect(html).toMatch(/data-sec="inprogress"><td colspan="5">\s*<span class="chev">▾<\/span>/);
     expect(html).toContain('class="t done hidden-lane" data-t="4"');
     expect(html).toContain('class="t" data-t="1"');
   });
 
-  test("row anatomy: number, type + readiness emoji, title, assignee", () => {
+  test("row anatomy: number, type + readiness emoji, title, assignee, waiting-on", () => {
     const html = renderBoard(input(tickets));
+    expect(html).toContain("<th>Waiting on</th>");
     expect(html).toContain('<td class="num">#1</td><td class="emo">🔨🤖</td>');
     expect(html).toContain('<td class="title">Claimed work</td><td class="who">@ann</td>');
     // unlabeled readiness is HITL; a closed ticket takes ✓ and a struck title
@@ -236,6 +239,71 @@ describe("the rendered board", () => {
     expect(html).toContain("0 frontier");
     expect(html).toContain("<tbody></tbody>");
     expect(html).not.toMatch(/<tr class="sec/);
+  });
+});
+
+describe("dependency edges", () => {
+  test("in-map refs survive; refs to issues outside the map are dropped", () => {
+    const tickets = [ticket(1), ticket(2)];
+    expect(inMapEdges(tickets, { 2: [1, 99] })).toEqual({ "2": [1] });
+    // …and an edge keyed by an out-of-map ticket goes with it.
+    expect(inMapEdges(tickets, { 99: [1] })).toEqual({});
+    // A ticket with no blockers keeps its (empty) entry — the reader lists every one.
+    expect(inMapEdges(tickets, { 1: [], 2: [1] })).toEqual({ "1": [], "2": [1] });
+  });
+
+  test("dependents are the inversion of the blocked-by edges", () => {
+    expect(dependentsOf({ 2: [1], 3: [1, 2] })).toEqual({ "1": [2, 3], "2": [3] });
+    expect(dependentsOf({ 1: [] })).toEqual({});
+  });
+
+  test("the payload drops out-of-map refs on the way through", () => {
+    const data = payloadOf(
+      renderBoard(input([ticket(1), ticket(2, { blockedBy: 2 })], { edges: { 2: [1, 404] } })),
+    );
+    expect(data.edges).toEqual({ "2": [1] });
+  });
+
+  test("chips are red for an open blocker and grey-struck for a closed one", () => {
+    const html = renderBoard(
+      input([ticket(1, { state: "closed" }), ticket(2), ticket(3, { blockedBy: 1 })], {
+        edges: { 3: [1, 2] },
+      }),
+    );
+    expect(html).toContain('<span class="wref hist" data-ref="1">#1</span>');
+    expect(html).toContain('<span class="wref" data-ref="2">#2</span>');
+    // …and the styles that make those two states read as red vs grey-struck.
+    expect(html).toMatch(/\.wref\.hist \{[^}]*line-through/);
+  });
+
+  test("a ticket blocked only from outside the map sits in Blocked with no chips", () => {
+    const html = renderBoard(input([ticket(1, { blockedBy: 1 })], { edges: { 1: [404] } }));
+    expect(html).toContain('data-t="1" data-lane="blocked"');
+    expect(html).toContain('<td class="wait"></td>');
+    expect(html).not.toContain('<span class="wref');
+  });
+
+  test("rows carry their dependents so the spotlight can light both ways", () => {
+    const html = renderBoard(
+      input([ticket(1), ticket(2, { blockedBy: 1 }), ticket(3, { blockedBy: 1 })], {
+        edges: { 2: [1], 3: [1] },
+      }),
+    );
+    expect(html).toContain('data-t="1" data-lane="frontier" data-dep="2,3"');
+    expect(html).toContain('data-t="2" data-lane="blocked"><td'); // nothing depends on #2
+  });
+
+  test("the legend names both spotlight colors", () => {
+    const html = renderBoard(input([ticket(1)]));
+    expect(html).toContain("waits on (blockers)");
+    expect(html).toContain("unblocks (dependents)");
+  });
+
+  test("a chip click jumps to the blocker, flashing it and opening its lane", () => {
+    const script = renderBoard(input([ticket(1), ticket(2)], { edges: { 2: [1] } }));
+    expect(script).toContain("scrollIntoView");
+    expect(script).toMatch(/classList\.add\("flash"\)/);
+    expect(script).toMatch(/@keyframes rowflash/);
   });
 });
 
