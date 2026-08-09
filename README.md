@@ -44,7 +44,10 @@ Reads `tracked.yaml` (list of tracked repos + local checkout paths), discovers o
 - one **tab** per open+unblocked sub-issue (title `[XY]<ticket#>`): launches
   `claude --worktree wayfinder/<map#>/<ticket#>`, waits for the TUI, then types
   `/wayfinder map #<map#> work on ticket #<ticket#>` into the input box and
-  **submits it** — each new tab lands already working its ticket
+  **submits it** — each new tab lands already working its ticket.
+  A **child map** (a sub-issue that is itself a `wayfinder:map`) is the one
+  exception: it shows on the parent's board badged 🗺️, in the In progress lane,
+  but never gets a tab — it already has its own workspace
 
 Tab titles are `[XY]<ticket#>`:
 
@@ -80,14 +83,20 @@ every group/workspace/tab it *would* create, without contacting cmux.
 `--watch [sec]` loops forever: sync, sleep `sec` seconds (default 30), repeat —
 runs never overlap, and `tracked.yaml` is re-read each pass. GitHub's budget is
 5,000 authenticated requests/hour (shared with everything else `gh` does on your
-token); a pass costs ~2 GETs per repo + 1 per open map + 1 per sub-issue (its
-blocked-by list, which the board's chips are drawn from) — e.g. 3 repos / 6 maps
-/ 40 tickets ≈ 6,240/hr at 30s, over budget, where a 120s cadence lands at a
-comfortable ~1,560/hr. The per-ticket term dominates once a map fills up, so
-prefer a longer interval over a busy one. The loop
-warns if projected spend crosses half the budget, and on a failed pass it checks
-`gh api rate_limit` (a free endpoint) and sleeps until the window resets if the
-budget is exhausted.
+token), and two guards keep the loop inside it:
+
+- **Probe-then-read.** Each pass spends one call per repo on the repo's newest
+  issue `updated_at`; only a change triggers the full read (~2 GETs per repo +
+  1 per open map + 1 per sub-issue — the per-ticket term dominates once a map
+  fills up). A full re-read is forced every 5 minutes anyway, because some
+  edits (a cross-repo blocker closing) may not move any `updated_at` the probe
+  can see. The cmux reconcile is local and runs every pass either way, so a
+  closed tab still heals at watch cadence.
+- **Budget governor.** After each pass the loop reads `gh api rate_limit` (a
+  free endpoint) and stretches the sleep so the measured pass cost spends at
+  most half of the *remaining* window budget — it slows down before the limit
+  instead of hitting it, whatever else the token is doing. A failed pass still
+  sleeps until the window resets if the budget is already exhausted.
 
 A live run **does start agents**: each new tab launches `claude` on its worktree,
 waits for the TUI, types the `/wayfinder …` prompt and submits it. Only *new*
@@ -105,6 +114,9 @@ default). It runs a normal additive sync first, then closes:
   that is still open but
   merely fell off the frontier (re-blocked) keeps its tab, so a live session is
   never yanked out from under you.
+- **child-map tabs** — a leftover tab on a child map, which sync no longer
+  creates. The additive path only warns about one (it may hold a live session);
+  `--prune` closes it.
 - **dead/untracked map workspaces** — a wayfinder workspace whose map has closed
   or whose repo left `tracked.yaml`.
 - **stray group anchors** — the empty workspace `workspace.group.create` leaves

@@ -1,5 +1,5 @@
 import { expect, test, describe } from "bun:test";
-import type { SubIssue, WayfinderMap } from "./issues.ts";
+import { MAP_LABEL, type SubIssue, type WayfinderMap } from "./issues.ts";
 import {
   boardCacheDir,
   boardPath,
@@ -23,6 +23,7 @@ import {
   ticketPrompt,
   ticketTabTitle,
   ticketTypeOf,
+  typeEmojiOf,
   workspaceDescription,
   workspaceTitle,
   worktreeName,
@@ -43,6 +44,7 @@ function sub(
     state,
     blockedBy,
     unblocked: state === "open" && blockedBy === 0,
+    isMap: labels.includes(MAP_LABEL),
     assignees: [],
     labels,
     body: "",
@@ -57,7 +59,8 @@ function mapOf(number: number, subIssues: SubIssue[]): WayfinderMap {
     title: `Map ${number}`,
     url: `https://x/${number}`,
     subIssues,
-    frontier: subIssues.filter((s) => s.unblocked),
+    // Mirrors readFrontierFor: a child map is never on the frontier.
+    frontier: subIssues.filter((s) => s.unblocked && !s.isMap),
   };
 }
 
@@ -168,8 +171,14 @@ describe("ticket tab titles [XY]<n>", () => {
 
   test("ticketTypeOf reads only wayfinder:<type> labels, defaulting to task", () => {
     expect(ticketTypeOf(["bug", "wayfinder:research"])).toBe("research");
-    expect(ticketTypeOf(["wayfinder:map"])).toBe("task");
     expect(ticketTypeOf([])).toBe("task");
+  });
+
+  test("a child map badges as a map, never as a task", () => {
+    // It used to read as "task" (🔨), which is how a child map reached the
+    // frontier and got a ticket tab.
+    expect(ticketTypeOf([MAP_LABEL])).toBe("map");
+    expect(typeEmojiOf([MAP_LABEL])).toBe("🗺️");
   });
 
   test("readiness labels are the source of truth; HITL default; human wins", () => {
@@ -336,6 +345,29 @@ describe("planTabs", () => {
     expect(plan.renames).toEqual([]);
     expect(plan.closes).toEqual([]);
   });
+
+  test("never opens a tab for a child map, however unblocked it looks", () => {
+    // The bug: #29, an open sub-issue with no blockers that is itself a map,
+    // got a [🔨🫵]29 task tab in its PARENT's workspace — a second session on a
+    // map that already has its own.
+    const childMap = sub(29, "open", 0, [MAP_LABEL]);
+    expect(childMap.unblocked).toBe(true); // still unblocked — the frontier is what changed
+    const map = mapOf(1, [childMap, sub(11, "open", 0, ["wayfinder:grilling"])]);
+    const plan = planTabs([shell], map);
+    expect(plan.creates.map((c) => c.ticket)).toEqual([11]);
+  });
+
+  test("reports a leftover child-map tab as a stray and leaves it open", () => {
+    const map = mapOf(1, [sub(29, "open", 0, [MAP_LABEL])]);
+    const plan = planTabs([shell, { id: "t1", title: "[🔨🫵]29" }], map);
+    expect(plan.strays).toEqual([
+      { id: "t1", title: "[🔨🫵]29", ticket: 29, reason: "child-map" },
+    ]);
+    // A live session may sit in it, so the additive path neither closes it nor
+    // churns its title towards a 🗺️ tab we would never create.
+    expect(plan.closes).toEqual([]);
+    expect(plan.renames).toEqual([]);
+  });
 });
 
 describe("planTabs --prune", () => {
@@ -349,7 +381,7 @@ describe("planTabs --prune", () => {
       map,
       prune,
     );
-    expect(plan.closes).toEqual([{ id: "t1", title: "[🔨🫵]103", ticket: 103 }]);
+    expect(plan.closes).toEqual([{ id: "t1", title: "[🔨🫵]103", ticket: 103, reason: "ticket-not-open" }]);
     expect(plan.renames).toEqual([]);
     expect(plan.desiredOrder).toEqual([107]); // 103 dropped
   });
@@ -357,14 +389,29 @@ describe("planTabs --prune", () => {
   test("closes an already-done tab whose ticket stays closed", () => {
     const map = mapOf(101, [sub(103, "closed")]);
     const plan = planTabs([shell, { id: "t1", title: "[🔨✓]103" }], map, prune);
-    expect(plan.closes).toEqual([{ id: "t1", title: "[🔨✓]103", ticket: 103 }]);
+    expect(plan.closes).toEqual([{ id: "t1", title: "[🔨✓]103", ticket: 103, reason: "ticket-not-open" }]);
     expect(plan.desiredOrder).toEqual([]);
   });
 
   test("closes a stale tab whose ticket vanished from the map (legacy title too)", () => {
     const map = mapOf(101, [sub(107, "open")]); // 103 no longer a sub-issue
     const plan = planTabs([shell, { id: "t1", title: "103" }, { id: "t2", title: "[🔨🫵]107" }], map, prune);
-    expect(plan.closes).toEqual([{ id: "t1", title: "103", ticket: 103 }]);
+    expect(plan.closes).toEqual([{ id: "t1", title: "103", ticket: 103, reason: "ticket-not-open" }]);
+  });
+
+  test("closes a child map's tab even though the child map is open", () => {
+    // The one open "ticket" prune closes: it should never have had a tab.
+    const map = mapOf(1, [sub(29, "open", 0, [MAP_LABEL]), sub(11, "open")]);
+    const plan = planTabs(
+      [shell, { id: "t1", title: "[🔨🫵]29" }, { id: "t2", title: "[🔨🫵]11" }],
+      map,
+      prune,
+    );
+    expect(plan.closes).toEqual([
+      { id: "t1", title: "[🔨🫵]29", ticket: 29, reason: "child-map" },
+    ]);
+    expect(plan.strays).toEqual([]); // moved into closes
+    expect(plan.desiredOrder).toEqual([11]); // 29 dropped
   });
 
   test("keeps a still-open ticket's tab even when it fell off the frontier", () => {

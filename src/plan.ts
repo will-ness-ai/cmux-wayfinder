@@ -175,17 +175,22 @@ export function ticketPrompt(mapNumber: number, ticket: number): string {
 
 // ---------- ticket tab titles: [<type><readiness>]<n> ----------
 
-export type TicketType = "grilling" | "task" | "research" | "prototype";
+export type TicketType = "grilling" | "task" | "research" | "prototype" | "map";
 
 /**
  * X slot — one emoji per `wayfinder:<type>` ticket-type label. The lanes board
  * embeds this table so its modal badges a ticket exactly like its tab does.
+ *
+ * `map` is the odd one out: it badges a *child map* on its parent's board. No
+ * tab ever carries it, because a child map is not takeable — {@link planTabs}
+ * never creates one.
  */
 export const TYPE_EMOJI: Record<TicketType, string> = {
   grilling: "🗣️",
   task: "🔨",
   research: "🔎",
   prototype: "🧪",
+  map: "🗺️",
 };
 
 /** Y slot — whose turn the tab is waiting on; ✓ takes the slot once closed. */
@@ -295,6 +300,11 @@ export interface TabClose {
   id: string;
   title: string;
   ticket: number;
+  /**
+   * `ticket-not-open`: the ticket closed, or vanished from the map.
+   * `child-map`: the ticket is a child map, so this tab must not exist at all.
+   */
+  reason: "ticket-not-open" | "child-map";
 }
 
 export interface TabPlan {
@@ -308,9 +318,18 @@ export interface TabPlan {
   /**
    * Managed tabs to close (only ever populated under `--prune`): tabs whose
    * ticket is no longer open — a closed ticket (the ✓ ones) or one that has
-   * vanished from the map (stale). Always `[]` on the additive path.
+   * vanished from the map (stale) — plus any tab on a child map, which should
+   * never have had one. Always `[]` on the additive path.
    */
   closes: TabClose[];
+  /**
+   * Child-map tabs the additive path found and kept — always `[]` under
+   * `--prune`, where they move into {@link closes}. Sync warns about these, so a
+   * leftover from before the child-map rule is visible instead of silently
+   * permanent. They stay open because one may hold a live session, and only the
+   * human should end that.
+   */
+  strays: TabClose[];
   /** Managed tabs in desired display order (ticket asc) — for reordering. */
   desiredOrder: number[];
 }
@@ -328,9 +347,9 @@ export interface TabPlanOptions {
 /**
  * Decide the tab operations for one map's workspace.
  *
- * - Frontier tickets (open + unblocked) with no managed tab → create `[XY]<n>`
- *   (Y from {@link readinessOf}) and send the boot command (only ever at
- *   creation).
+ * - Frontier tickets with no managed tab → create `[XY]<n>` (Y from
+ *   {@link readinessOf}) and send the boot command (only ever at creation). The
+ *   frontier already excludes child maps, so no tab is ever minted for one.
  * - A managed tab whose title drifted from the desired `[XY]<n>` → rename.
  *   The whole title is derived from the ticket's live labels/state (labels are
  *   the source of truth — flip readiness by relabelling the issue): ✓ into/out
@@ -368,14 +387,29 @@ export function planTabs(
 
   const renames: TabRename[] = [];
   const closes: TabClose[] = [];
+  const strays: TabClose[] = [];
   const closedTickets = new Set<number>();
   for (const [ticket, tab] of managed) {
     const sub = byNumber.get(ticket);
     const ticketOpen = sub?.state === "open";
+    // A child map is not a ticket, so a tab for it is one an older sync minted
+    // before this rule existed. Prune closes it whatever its state; the additive
+    // path leaves it alone — a live session must not be pulled out from under
+    // the human, and renaming a tab we will never create again is only churn.
+    if (sub?.isMap) {
+      const stray: TabClose = { id: tab.id, title: tab.title, ticket, reason: "child-map" };
+      if (prune) {
+        closes.push(stray);
+        closedTickets.add(ticket);
+      } else {
+        strays.push(stray);
+      }
+      continue;
+    }
     // Prune: a tab whose ticket is no longer open (closed → ✓, or gone → stale)
     // is closed rather than ✓-marked. Open tickets keep their tab regardless.
     if (prune && !ticketOpen) {
-      closes.push({ id: tab.id, title: tab.title, ticket });
+      closes.push({ id: tab.id, title: tab.title, ticket, reason: "ticket-not-open" });
       closedTickets.add(ticket);
       continue;
     }
@@ -396,7 +430,7 @@ export function planTabs(
   for (const t of closedTickets) tickets.delete(t);
   const desiredOrder = [...tickets].sort((a, b) => a - b);
 
-  return { creates, renames, closes, desiredOrder };
+  return { creates, renames, closes, strays, desiredOrder };
 }
 
 // ---------- workspace prune (pure) ----------
