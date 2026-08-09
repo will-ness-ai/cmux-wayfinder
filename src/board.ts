@@ -45,6 +45,8 @@ export interface BoardTicket {
   url: string;
   /** Markdown body, carried into the payload for the modal (ticket #10). */
   body: string;
+  /** True for a *child map* — a sub-issue that is itself a wayfinder map. */
+  isMap: boolean;
 }
 
 export interface BoardMap {
@@ -86,10 +88,17 @@ const LANE_NAME: Record<Lane, string> = {
  * Blocked, its assignee shown as a badge); In progress = open, unblocked and
  * claimed (any assignee = "a session has taken it", not liveness); Frontier =
  * open, unblocked and unclaimed.
+ *
+ * A *child map* is the one row that is not a ticket, so the claim test cannot
+ * place it — nobody assigns a map. It is running work in its own workspace, so
+ * an open, unblocked child map reads as In progress. What matters is that it
+ * never reaches Frontier: that lane means "takeable right now", and taking a
+ * child map from its parent's board is exactly the thing to prevent.
  */
 export function laneOf(t: BoardTicket): Lane {
   if (t.state === "closed") return "resolved";
   if (t.blockedBy > 0) return "blocked";
+  if (t.isMap) return "inprogress";
   return t.assignees.length > 0 ? "inprogress" : "frontier";
 }
 
@@ -152,6 +161,8 @@ export interface PayloadTicket {
   lane: Lane;
   /** Likewise its ticket type — the modal badges and names it, never parses it. */
   type: TicketType;
+  /** True for a child map, so the modal can say so instead of inferring it. */
+  isMap: boolean;
 }
 
 export interface BoardPayload {
@@ -178,6 +189,7 @@ export function boardPayload(input: BoardInput): BoardPayload {
       html_url: t.url,
       lane: laneOf(t),
       type: ticketTypeOf(t.labels),
+      isMap: t.isMap,
     };
   }
   const edges = inMapEdges(input.tickets, input.edges);
@@ -331,6 +343,17 @@ function waitCell(t: BoardTicket, ctx: EdgeContext): string {
   return `<td class="wait">${chips.join("")}</td>`;
 }
 
+/**
+ * The row's two-slot badge, same as a tab title carries: type emoji, then whose
+ * turn it is (✓ once closed). A child map has no turn to take — its work runs
+ * in its own workspace — so its second slot stays empty until it closes.
+ */
+function badge(t: BoardTicket): string {
+  const type = typeEmojiOf(t.labels);
+  if (t.state === "closed") return `${type}${DONE}`;
+  return t.isMap ? type : `${type}${readinessOf(t.labels)}`;
+}
+
 function row(t: BoardTicket, lane: Lane, collapsed: boolean, ctx: EdgeContext): string {
   const done = t.state === "closed";
   const cls = `t${done ? " done" : ""}${collapsed ? " hidden-lane" : ""}`;
@@ -340,7 +363,7 @@ function row(t: BoardTicket, lane: Lane, collapsed: boolean, ctx: EdgeContext): 
   return (
     `<tr class="${cls}" data-t="${t.number}" data-lane="${lane}"${dep}>` +
     `<td class="num">#${t.number}</td>` +
-    `<td class="emo">${typeEmojiOf(t.labels)}${done ? DONE : readinessOf(t.labels)}</td>` +
+    `<td class="emo">${badge(t)}</td>` +
     `<td class="title">${esc(t.title)}</td>` +
     `<td class="who">${who}</td>` +
     waitCell(t, ctx) +

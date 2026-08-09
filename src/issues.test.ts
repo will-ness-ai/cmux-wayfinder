@@ -1,5 +1,11 @@
 import { expect, test, describe } from "bun:test";
-import { blockedByEdges, toBlockerNumbers, toSubIssue, type RawSubIssue } from "./issues.ts";
+import {
+  blockedByEdges,
+  MAP_LABEL,
+  toBlockerNumbers,
+  toSubIssue,
+  type RawSubIssue,
+} from "./issues.ts";
 
 /** A raw element of GitHub's `sub_issues` listing, trimmed to what we read. */
 function raw(number: number, over: Partial<RawSubIssue> = {}): RawSubIssue {
@@ -34,6 +40,7 @@ describe("toSubIssue", () => {
       state: "open",
       blockedBy: 1,
       unblocked: false,
+      isMap: false,
       assignees: ["ann"],
       labels: ["wayfinder:task", "ready-for-agent"],
       body: "## What to build\n\nthe thing",
@@ -55,6 +62,16 @@ describe("toSubIssue", () => {
     expect(toSubIssue(raw(1), [2]).unblocked).toBe(true);
     expect(toSubIssue(raw(1, { issue_dependencies_summary: { blocked_by: 1 } }), [2]).unblocked).toBe(false);
     expect(toSubIssue(raw(1, { state: "closed" }), []).unblocked).toBe(false);
+  });
+
+  test("isMap marks a sub-issue that carries the map label — a child map", () => {
+    const child = toSubIssue(raw(29, { labels: [{ name: MAP_LABEL }] }), []);
+    expect(child.isMap).toBe(true);
+    // unblocked stays true: it is the frontier that excludes a child map, so
+    // the two facts must not be conflated.
+    expect(child.unblocked).toBe(true);
+    expect(toSubIssue(raw(1, { labels: [{ name: "wayfinder:task" }] }), []).isMap).toBe(false);
+    expect(toSubIssue(raw(1), []).isMap).toBe(false);
   });
 });
 

@@ -11,6 +11,13 @@
 
 export type IssueState = "open" | "closed";
 
+/**
+ * The label that marks an issue a wayfinder map. A map is usually read as the
+ * root of its own workspace, but it can *also* be a sub-issue of another map —
+ * see {@link SubIssue.isMap}.
+ */
+export const MAP_LABEL = "wayfinder:map";
+
 /** The slice of a `sub_issues` listing element this codebase reads. */
 export interface RawSubIssue {
   number: number;
@@ -45,8 +52,17 @@ export interface SubIssue {
   state: IssueState;
   /** Count of *open* blockers (GitHub drops closed ones from this field). */
   blockedBy: number;
-  /** open && blockedBy === 0 — takeable right now. */
+  /** open && blockedBy === 0. Says nothing about {@link isMap} — see it. */
   unblocked: boolean;
+  /**
+   * True when this sub-issue is itself a wayfinder map — a *child map*.
+   *
+   * A child map is real work on the parent's board, but it is not a ticket: it
+   * has its own workspace, and nobody takes it from the parent. So it never
+   * joins the parent's frontier and never gets a ticket tab, however unblocked
+   * it looks.
+   */
+  isMap: boolean;
   assignees: string[];
   /** Label names — carries the `wayfinder:<type>` ticket-type label. */
   labels: string[];
@@ -84,14 +100,16 @@ export type EdgeMap = Record<string, number[]>;
 export function toSubIssue(raw: RawSubIssue, blockers: number[]): SubIssue {
   const blockedBy = raw.issue_dependencies_summary?.blocked_by ?? 0;
   const state: IssueState = raw.state === "closed" ? "closed" : "open";
+  const labels = (raw.labels ?? []).map((l) => l?.name).filter((n): n is string => Boolean(n));
   return {
     number: raw.number,
     title: raw.title,
     state,
     blockedBy,
     unblocked: state === "open" && blockedBy === 0,
+    isMap: labels.includes(MAP_LABEL),
     assignees: (raw.assignees ?? []).map((a) => a.login),
-    labels: (raw.labels ?? []).map((l) => l?.name).filter((n): n is string => Boolean(n)),
+    labels,
     body: raw.body ?? "",
     url: raw.html_url,
     blockers,

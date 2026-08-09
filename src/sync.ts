@@ -14,7 +14,8 @@
  * anchors), and deletes the cached board files those dead maps left behind
  * (#11) — the only path that ever removes anything. `--dry-run` prints the plan
  * without touching cmux or disk. `--watch [sec]` re-syncs every `sec` seconds
- * (default 30) until killed, with GitHub rate-budget guardrails (see `watch`).
+ * (default 30) until killed, probing for changes before spending the full
+ * GitHub read and pacing itself against the rate budget (see `watch`).
  *
  *   bun src/sync.ts [--config tracked.yaml] [--dry-run] [--prune] [--watch [sec]]
  */
@@ -25,7 +26,8 @@ import { dirname, join } from "node:path";
 
 import { sh } from "./proc.ts";
 import { loadTracked, type TrackedRepo } from "./config.ts";
-import { readFrontierFor, resolveRepo } from "./frontier.ts";
+import { probeNewestUpdate, readFrontierFor, resolveRepo, takeGhCallCount } from "./frontier.ts";
+import { needsFullFetch, pacedDelaySec, type RepoPulse } from "./pace.ts";
 import { blockedByEdges, type WayfinderMap } from "./issues.ts";
 import * as cmux from "./cmux.ts";
 import { formatGeneratedAt, renderBoard } from "./board.ts";
@@ -94,21 +96,61 @@ function makeLog(dryRun: boolean): Logger {
   };
 }
 
-/** Returns how many sub-issues the pass read — one API call each (see `watch`). */
+/** Per-repo memory between watch passes, keyed by the config's `repo` name. */
+interface RepoSyncState {
+  /** Canonical `full_name`, resolved once — renames are rare (see `watch`). */
+  canonical: string;
+  pulse: RepoPulse;
+  /** The last full read, reconciled again on passes that skip GitHub. */
+  maps: WayfinderMap[];
+}
+
+/**
+ * Sync one tracked repo. In watch mode (`state` non-null) a one-call probe —
+ * the repo's newest `updated_at` — decides whether to re-read maps from
+ * GitHub or reuse the previous pass's; the cmux reconcile is local and free,
+ * so it runs either way and a closed tab still heals at watch cadence. A
+ * single run (`state` null) always reads.
+ */
 async function syncRepo(
   tracked: TrackedRepo,
   opts: Options,
   log: Logger,
   desired: Set<string>,
-): Promise<number> {
-  const canonical = await resolveRepo(tracked.repo);
-  const maps = await readFrontierFor(canonical);
+  state: Map<string, RepoSyncState> | null,
+): Promise<void> {
+  const prev = state?.get(tracked.repo);
+  const canonical = prev?.canonical ?? (await resolveRepo(tracked.repo));
+
+  let maps: WayfinderMap[];
+  let freshness = "";
+  if (state) {
+    const probed = await probeNewestUpdate(canonical);
+    const now = Date.now();
+    if (needsFullFetch(prev?.pulse, probed, now, FULL_REFRESH_MS)) {
+      maps = await readFrontierFor(canonical);
+      state.set(tracked.repo, {
+        canonical,
+        // The probe ran *before* the read, so an edit landing between the two
+        // shows up as a probe change next pass — an extra read, never a miss.
+        pulse: { newestUpdate: probed, lastFullFetchMs: now },
+        maps,
+      });
+    } else {
+      maps = prev!.maps;
+      freshness = " — unchanged on GitHub, reconciling last read";
+    }
+  } else {
+    maps = await readFrontierFor(canonical);
+  }
+
   // Every open map is a workspace that *should* exist — record it so the prune
   // pass keeps it (and prunes everything else). Done even in dry-run.
   for (const map of maps) desired.add(workspaceDescription(canonical, map.number));
-  const subIssues = maps.reduce((n, m) => n + m.subIssues.length, 0);
-  log.info(`\n${canonical}${canonical !== tracked.repo ? ` (was ${tracked.repo})` : ""} — ${maps.length} open map(s)`);
-  if (maps.length === 0) return subIssues;
+  log.info(
+    `\n${canonical}${canonical !== tracked.repo ? ` (was ${tracked.repo})` : ""} — ${maps.length} open map(s)${freshness}`,
+  );
+  if (maps.length === 0) return;
 
   const before = await cmux.snapshot();
   const preexistingIds = new Set(before.workspaces.map((w) => w.id));
@@ -125,7 +167,6 @@ async function syncRepo(
   for (const map of maps) {
     await syncMap({ canonical, cwd: tracked.path, map, group, opts, log });
   }
-  return subIssues;
 }
 
 async function syncMap(ctx: {
@@ -180,6 +221,16 @@ async function reconcileTabs(ctx: {
   const existing: Tab[] = ws ? await cmux.listSurfaces(ws.id) : [];
   const plan = planTabs(existing, map, { prune: opts.prune });
 
+  // A child-map tab is never created any more, so a stray one is a leftover.
+  // Say so every pass: the additive path will not close it (a live session may
+  // be in it), so the human must close it or run --prune.
+  for (const s of plan.strays) {
+    log.info(
+      `  ⚠ workspace "${title}": tab "${s.title}" is on child map #${s.ticket}, not a ticket — ` +
+        `close it by hand or run --prune`,
+    );
+  }
+
   if (plan.creates.length === 0 && plan.renames.length === 0 && plan.closes.length === 0) {
     log.info(`  workspace "${title}": up to date (frontier ${fmtFrontier(map)})`);
     return;
@@ -214,7 +265,11 @@ async function reconcileTabs(ctx: {
 
   // --prune only: close done/stale ticket tabs (plan.closes is [] otherwise).
   for (const c of plan.closes) {
-    log.act(`close tab "${c.title}" (ticket #${c.ticket} no longer open)`);
+    const why =
+      c.reason === "child-map"
+        ? `#${c.ticket} is a child map, not a ticket`
+        : `ticket #${c.ticket} no longer open`;
+    log.act(`close tab "${c.title}" (${why})`);
     if (!opts.dryRun && ws) {
       const surf = (await cmux.listSurfaces(ws.id)).find((s) => s.id === c.id);
       if (surf) await cmux.closeSurface(surf.id);
@@ -414,77 +469,102 @@ async function listCacheEntries(root: string): Promise<string[]> {
 
 /**
  * One full sync pass. Reloads tracked.yaml each time so watch mode picks up
- * config edits between ticks. Returns the run's shape for the watch loop's
- * rate-budget estimate.
+ * config edits between ticks. `state` (watch mode only) carries the probe
+ * baselines and cached reads between passes; null = always read GitHub.
  */
 async function runSync(
   opts: Options,
   log: Logger,
-): Promise<{ repos: number; maps: number; subIssues: number }> {
+  state: Map<string, RepoSyncState> | null = null,
+): Promise<void> {
   const tracked = await loadTracked(opts.configPath);
   const desired = new Set<string>();
-  let subIssues = 0;
   for (const repo of tracked) {
-    subIssues += await syncRepo(repo, opts, log, desired);
+    await syncRepo(repo, opts, log, desired, state);
   }
   if (opts.prune) await prune(desired, opts, log);
   console.log(opts.dryRun ? "\n(dry run — no changes made)" : "\nsync complete");
-  return { repos: tracked.length, maps: desired.size, subIssues };
 }
 
-/** GitHub's primary REST budget for an authenticated user token. */
-const GH_HOURLY_LIMIT = 5000;
+/**
+ * Force a full GitHub re-read at least this often per repo, probe or no
+ * probe — the backstop for edits the probe cannot see (see `needsFullFetch`).
+ */
+const FULL_REFRESH_MS = 5 * 60_000;
+
+/** The watch loop's share of the *remaining* budget; the rest stays free for
+ *  everything else on the token (interactive `gh`, other tools). */
+const GOVERNOR_HEADROOM = 0.5;
 
 /**
- * If the token's core REST budget is exhausted, seconds until it resets
- * (else null). `GET /rate_limit` itself never counts against the limit, so
- * this probe is free. Errors (offline, gh missing) read as "not exhausted".
+ * The token's core REST budget: calls remaining and seconds until the window
+ * resets. `GET /rate_limit` itself never counts against the limit, so this
+ * probe is free. Errors (offline, gh missing) read as null — no data.
  */
-async function rateLimitResetDelay(): Promise<number | null> {
+async function ghCoreBudget(): Promise<{ remaining: number; resetInSec: number } | null> {
   try {
     const out = await sh(["gh", "api", "rate_limit", "--jq", ".resources.core | [.remaining, .reset] | @tsv"]);
     const [remaining, reset] = out.trim().split("\t").map(Number);
-    if (!Number.isFinite(remaining) || !Number.isFinite(reset) || remaining > 0) return null;
-    return Math.max(0, reset - Math.floor(Date.now() / 1000)) + 5;
+    if (!Number.isFinite(remaining) || !Number.isFinite(reset)) return null;
+    return { remaining, resetInSec: Math.max(0, reset - Math.floor(Date.now() / 1000)) };
   } catch {
     return null;
   }
 }
 
 /**
- * `--watch`: sync forever, sleeping `watchSec` between the end of one pass and
- * the start of the next (runs never overlap). Rate-limit posture: a pass costs
- * ~2 GETs per repo (resolve + map list) + 1 per open map (sub-issue listing) +
- * 1 per sub-issue (its blocked-by listing, ticket #9) against the shared
- * 5,000/hr budget — at the default 30s cadence that's 120 × (2·repos + maps +
- * sub-issues) per hour, e.g. 3 repos / 6 maps / 40 tickets ≈ 6,240/hr, well
- * over budget. We warn once if the projected spend crosses half the budget, and
- * a failed pass checks for exhaustion and sleeps until the window resets
- * instead of hammering.
+ * `--watch`: sync forever, sleeping between the end of one pass and the start
+ * of the next (runs never overlap). Two guards keep the loop inside GitHub's
+ * shared 5,000/hr core budget:
+ *
+ * 1. Probe-then-read (`syncRepo`): a steady-state pass costs one call per
+ *    repo; only a probed change or the FULL_REFRESH_MS backstop triggers the
+ *    full fan-out (2 per repo + 1 per open map + 1 per sub-issue).
+ * 2. Governor: after each pass, stretch the sleep so the measured pass cost
+ *    spends at most GOVERNOR_HEADROOM of the remaining window budget
+ *    (`pacedDelaySec`) — the loop slows down *before* the limit, whatever
+ *    else the token is being used for.
+ *
+ * A failed pass drops all cached state (a repo rename mid-watch heals on the
+ * next pass) and still sleeps until the reset if the budget is exhausted.
  */
 async function watch(opts: Options, log: Logger) {
   log.info(`watching: syncing every ${opts.watchSec}s (ctrl-c to stop)`);
-  let warnedBudget = false;
+  const state = new Map<string, RepoSyncState>();
   for (;;) {
     log.info(`\n── sync @ ${new Date().toLocaleTimeString()} ──`);
+    let delaySec = opts.watchSec!;
     try {
-      const { repos, maps, subIssues } = await runSync(opts, log);
-      const perHour = Math.round((3600 / opts.watchSec!) * (2 * repos + maps + subIssues));
-      if (!warnedBudget && perHour > GH_HOURLY_LIMIT / 2) {
-        warnedBudget = true;
+      await runSync(opts, log, state);
+      const passCalls = takeGhCallCount();
+      const budget = await ghCoreBudget();
+      if (budget) {
+        delaySec = pacedDelaySec({
+          passCalls,
+          remaining: budget.remaining,
+          resetInSec: budget.resetInSec,
+          baseSec: opts.watchSec!,
+          headroom: GOVERNOR_HEADROOM,
+        });
         log.info(
-          `⚠ projected ~${perHour} GitHub API calls/hr — over half the ${GH_HOURLY_LIMIT}/hr budget; consider a longer --watch interval`,
+          `gh budget: pass used ${passCalls} call(s); ${budget.remaining} remaining, window resets in ${Math.ceil(budget.resetInSec / 60)} min`,
         );
+        if (delaySec > opts.watchSec!) {
+          log.info(`⚠ pacing: next sync in ${delaySec}s to stay inside the rate budget`);
+        }
       }
     } catch (e) {
       console.error(`sync failed: ${e instanceof Error ? e.message : e}`);
-      const wait = await rateLimitResetDelay();
-      if (wait !== null) {
+      state.clear(); // stale canonical names or cached maps may be the cause
+      takeGhCallCount(); // drop the aborted pass's count
+      const budget = await ghCoreBudget();
+      if (budget && budget.remaining <= 0) {
+        const wait = budget.resetInSec + 5;
         log.info(`⚠ GitHub rate limit exhausted — sleeping ${Math.ceil(wait / 60)} min until it resets`);
         await Bun.sleep(wait * 1000);
       }
     }
-    await Bun.sleep(opts.watchSec! * 1000);
+    await Bun.sleep(delaySec * 1000);
   }
 }
 

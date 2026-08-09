@@ -27,6 +27,7 @@ function ticket(number: number, over: Partial<BoardTicket> = {}): BoardTicket {
     labels: [],
     body: "",
     url: `https://github.com/acme/example/issues/${number}`,
+    isMap: false,
     ...over,
   };
 }
@@ -67,6 +68,24 @@ describe("lane predicates", () => {
   test("open + unblocked splits on the claim: assigned = In progress, else Frontier", () => {
     expect(laneOf(ticket(1, { assignees: ["ann"] }))).toBe("inprogress");
     expect(laneOf(ticket(1))).toBe("frontier");
+  });
+
+  test("an open child map shows In progress, never Frontier", () => {
+    // Frontier means "takeable right now". A child map is worked in its own
+    // workspace, so it must never sit in the lane that invites a session.
+    const child = ticket(29, { isMap: true, labels: ["wayfinder:map"] });
+    expect(laneOf(child)).toBe("inprogress");
+    // Its own state still places it otherwise.
+    expect(laneOf(ticket(29, { isMap: true, blockedBy: 1 }))).toBe("blocked");
+    expect(laneOf(ticket(29, { isMap: true, state: "closed" }))).toBe("resolved");
+  });
+
+  test("a child map row badges 🗺️ with no readiness slot to answer", () => {
+    const child = ticket(29, { isMap: true, labels: ["wayfinder:map"] });
+    const html = renderBoard(input([child]));
+    expect(html).toContain('data-t="29" data-lane="inprogress"');
+    expect(html).toContain('<td class="emo">🗺️</td>'); // no 🫵 — nobody takes a map
+    expect(payloadOf(html).tickets["29"]!.isMap).toBe(true);
   });
 
   test("an open blocker outside the map still blocks (count, not in-map edges)", () => {
@@ -119,6 +138,7 @@ describe("embedded payload", () => {
       html_url: "https://github.com/acme/example/issues/7",
       lane: "inprogress",
       type: "research",
+      isMap: false,
     });
   });
 

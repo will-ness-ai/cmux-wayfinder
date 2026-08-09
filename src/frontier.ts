@@ -13,6 +13,11 @@
  * That summary rides inline on each element of the `sub_issues` listing, so no
  * per-sub-issue second call is needed for it.
  *
+ * The *frontier* is narrower than "unblocked": a child map (a sub-issue that
+ * carries the map label) is never on it. A child map is charted work the parent
+ * board must show, but it is not takeable — it gets its own workspace, so
+ * putting it on the parent's frontier would open a second, wrong session on it.
+ *
  * The *identities* of the blockers do need one: the `dependencies/blocked_by`
  * listing, one call per sub-issue per pass. Unlike the summary count it keeps
  * closed blockers, which is what the board's historical (grey-struck) chips are
@@ -23,6 +28,7 @@
 
 import { sh } from "./proc.ts";
 import {
+  MAP_LABEL,
   toBlockerNumbers,
   toSubIssue,
   type RawBlocker,
@@ -31,7 +37,20 @@ import {
   type WayfinderMap,
 } from "./issues.ts";
 
-const MAP_LABEL = "wayfinder:map";
+/**
+ * GitHub calls made through this module since the last take. `--paginate`
+ * follows Link headers, so a >100-element listing costs more HTTP requests
+ * than the one it counts — rare at per_page=100, and the governor only needs
+ * the right order of magnitude.
+ */
+let ghCallCount = 0;
+
+/** Read-and-reset the call counter — the watch governor's per-pass cost. */
+export function takeGhCallCount(): number {
+  const n = ghCallCount;
+  ghCallCount = 0;
+  return n;
+}
 
 /**
  * GET a paginated list endpoint via `gh api`, returning every element across
@@ -41,6 +60,7 @@ const MAP_LABEL = "wayfinder:map";
  * boundary, so the raw types in `issues.ts` keep the claim to fields we read.
  */
 async function ghList<T>(path: string): Promise<T[]> {
+  ghCallCount++;
   const out = await sh(["gh", "api", path, "--paginate", "--jq", ".[]"]);
   return out
     .split("\n")
@@ -73,7 +93,27 @@ async function mapPooled<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise
  * every list call below must use the canonical name this returns.
  */
 export async function resolveRepo(repo: string): Promise<string> {
+  ghCallCount++;
   const out = await sh(["gh", "api", `repos/${repo}`, "--jq", ".full_name"]);
+  return out.trim();
+}
+
+/**
+ * The repo's newest `updated_at` across issues *and* PRs (the listing carries
+ * both — PR churn can only cause a harmless extra re-read), or "" for a repo
+ * with none. One unpaginated call: the watch probe that decides whether the
+ * full fan-out can be skipped. Linking a sub-issue bumps the *child's*
+ * `updated_at` (not the parent's), so charting edits still land here.
+ */
+export async function probeNewestUpdate(canonical: string): Promise<string> {
+  ghCallCount++;
+  const out = await sh([
+    "gh",
+    "api",
+    `repos/${canonical}/issues?state=all&sort=updated&direction=desc&per_page=1`,
+    "--jq",
+    '.[0].updated_at // ""',
+  ]);
   return out.trim();
 }
 
@@ -122,7 +162,9 @@ export async function readFrontierFor(canonical: string): Promise<WayfinderMap[]
         title: m.title,
         url: m.html_url,
         subIssues,
-        frontier: subIssues.filter((s) => s.unblocked),
+        // A child map stays in `subIssues` (the board shows it) but never joins
+        // the frontier — see this module's header.
+        frontier: subIssues.filter((s) => s.unblocked && !s.isMap),
       };
     }),
   );
@@ -142,7 +184,8 @@ if (import.meta.main) {
     for (const map of maps) {
       console.log(`\n  map #${map.number} — ${map.title}`);
       for (const s of map.subIssues) {
-        const mark = s.state === "closed" ? "✓" : s.unblocked ? "→" : "·";
+        // A child map is marked "▣": open and unblocked, but never takeable.
+        const mark = s.state === "closed" ? "✓" : s.isMap ? "▣" : s.unblocked ? "→" : "·";
         const blocked = s.state === "open" && s.blockedBy > 0 ? ` (blocked_by ${s.blockedBy})` : "";
         const claimed = s.assignees.length ? ` @${s.assignees.join(",@")}` : "";
         const waits = s.blockers.length ? ` ⟵ ${s.blockers.map((b) => `#${b}`).join(" ")}` : "";
