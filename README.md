@@ -61,6 +61,30 @@ Tab titles are `[XY]<ticket#>`:
 
 Sync is additive + rename-only by default (closed tickets → `[X✓]<n>` tabs); nothing is closed or deleted without `--prune`.
 
+### The settle window
+
+A ticket must be **2 minutes old** before sync opens a tab on it — and so before
+it launches an agent.
+
+A map is charted in a burst: the tickets are created, then linked to the map,
+then wired with their `blocked_by` edges, over roughly a minute. A read that
+lands between the linking and the wiring sees every ticket open with no blockers
+— a frontier of the whole map — and without the window sync boots an agent on
+each one, including tickets that are blocked seconds later. The window waits the
+burst out. A settling ticket is reported each pass (`⏳ … takeable in 97s`) and
+still shows in its board lane; only the tab waits.
+
+The window measures a ticket's age from **creation**, so it costs nothing in
+normal use: a ticket that reaches the frontier later, when its blocker closes,
+is long settled and gets its tab on the very next pass. In `--watch` mode the
+loop also wakes when a settling ticket comes due instead of at the following
+tick — unless the rate governor is pacing that sleep against the API budget,
+which always wins.
+
+Two minutes is roughly twice the charting burst measured on a nine-ticket map.
+A burst grows with the number of tickets, so a much larger map could still
+outlast the window: it shortens the odds rather than abolishing them.
+
 ## Usage
 
 ```sh

@@ -307,6 +307,13 @@ export interface TabClose {
   reason: "ticket-not-open" | "child-map";
 }
 
+/** A frontier ticket that is still *settling* — see {@link TICKET_SETTLE_MS}. */
+export interface TabSettling {
+  ticket: number;
+  /** When the ticket stops settling and becomes takeable (ms since the epoch). */
+  takeableAtMs: number;
+}
+
 export interface TabPlan {
   /** New tabs for frontier tickets with no tab yet, ascending by ticket. */
   creates: TabCreate[];
@@ -330,9 +337,27 @@ export interface TabPlan {
    * human should end that.
    */
   strays: TabClose[];
+  /**
+   * Frontier tickets still settling — a create this pass declined to make,
+   * ascending by ticket. They are not an error: the next pass after
+   * `takeableAtMs` creates the tab, unless the ticket left the frontier by then
+   * (which is the point). Sync reports them and wakes up in time for them.
+   */
+  settling: TabSettling[];
   /** Managed tabs in desired display order (ticket asc) — for reordering. */
   desiredOrder: number[];
 }
+
+/**
+ * The *settle window*: how long a ticket must exist before sync will open a tab
+ * on it, and so launch an agent. Settling and charting are defined in
+ * CONTEXT.md — this is the window's length and the reason for its size.
+ *
+ * Two minutes is about twice the charting burst measured on a nine-ticket map.
+ * A burst grows with ticket count, so a map charted in far more tickets could
+ * still outlast it; the window shortens the odds, it does not abolish them.
+ */
+export const TICKET_SETTLE_MS = 120_000;
 
 export interface TabPlanOptions {
   /**
@@ -342,6 +367,12 @@ export interface TabPlanOptions {
    * their tab, so a live session is never yanked out from under the human.
    */
   prune?: boolean;
+  /**
+   * Wall clock the settle window is measured against (ms since the epoch).
+   * Required, and with no default, so this module stays a pure function of its
+   * arguments: the caller owns the clock, and a test can name any moment.
+   */
+  nowMs: number;
 }
 
 /**
@@ -350,6 +381,9 @@ export interface TabPlanOptions {
  * - Frontier tickets with no managed tab → create `[XY]<n>` (Y from
  *   {@link readinessOf}) and send the boot command (only ever at creation). The
  *   frontier already excludes child maps, so no tab is ever minted for one.
+ *   A ticket younger than the settle window goes to `settling` instead, so a
+ *   map still being charted cannot boot an agent on every ticket at once —
+ *   see {@link TICKET_SETTLE_MS}.
  * - A managed tab whose title drifted from the desired `[XY]<n>` → rename.
  *   The whole title is derived from the ticket's live labels/state (labels are
  *   the source of truth — flip readiness by relabelling the issue): ✓ into/out
@@ -358,12 +392,9 @@ export interface TabPlanOptions {
  * - Additive default never closes a tab; under `prune`, done/stale tabs close
  *   (see {@link TabPlanOptions.prune}) instead of being ✓-renamed.
  */
-export function planTabs(
-  existingTabs: Tab[],
-  map: WayfinderMap,
-  opts: TabPlanOptions = {},
-): TabPlan {
+export function planTabs(existingTabs: Tab[], map: WayfinderMap, opts: TabPlanOptions): TabPlan {
   const prune = opts.prune ?? false;
+  const nowMs = opts.nowMs;
   const byNumber = new Map<number, SubIssue>(map.subIssues.map((s) => [s.number, s]));
 
   // Existing managed tabs, keyed by ticket (first wins on the odd duplicate).
@@ -374,15 +405,22 @@ export function planTabs(
   }
 
   const creates: TabCreate[] = [];
+  const settling: TabSettling[] = [];
   for (const sub of [...map.frontier].sort((a, b) => a.number - b.number)) {
-    if (!managed.has(sub.number)) {
-      creates.push({
-        ticket: sub.number,
-        title: desiredTabTitle(sub),
-        launch: launchCommand(map.number, sub.number),
-        prompt: ticketPrompt(map.number, sub.number),
-      });
+    if (managed.has(sub.number)) continue;
+    // Too young to trust: the map may still be charting, and the blockers that
+    // will take this ticket off the frontier may not be wired yet.
+    const takeableAtMs = sub.createdAtMs + TICKET_SETTLE_MS;
+    if (takeableAtMs > nowMs) {
+      settling.push({ ticket: sub.number, takeableAtMs });
+      continue;
     }
+    creates.push({
+      ticket: sub.number,
+      title: desiredTabTitle(sub),
+      launch: launchCommand(map.number, sub.number),
+      prompt: ticketPrompt(map.number, sub.number),
+    });
   }
 
   const renames: TabRename[] = [];
@@ -430,7 +468,7 @@ export function planTabs(
   for (const t of closedTickets) tickets.delete(t);
   const desiredOrder = [...tickets].sort((a, b) => a - b);
 
-  return { creates, renames, closes, strays, desiredOrder };
+  return { creates, renames, closes, strays, settling, desiredOrder };
 }
 
 // ---------- workspace prune (pure) ----------

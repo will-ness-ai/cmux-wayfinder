@@ -23,6 +23,7 @@ import {
   ticketPrompt,
   ticketTabTitle,
   ticketTypeOf,
+  TICKET_SETTLE_MS,
   typeEmojiOf,
   workspaceDescription,
   workspaceTitle,
@@ -32,11 +33,16 @@ import {
   type WorkspaceRef,
 } from "./plan.ts";
 
+/** The moment every planTabs test is evaluated at — the clock is an argument. */
+const NOW = 1_760_000_000_000;
+
 function sub(
   number: number,
   state: "open" | "closed",
   blockedBy = 0,
   labels: string[] = [],
+  /** Epoch by default: long settled, so the settle gate is out of the way. */
+  createdAtMs = 0,
 ): SubIssue {
   return {
     number,
@@ -48,6 +54,7 @@ function sub(
     assignees: [],
     labels,
     body: "",
+    createdAtMs,
     url: `https://x/${number}`,
     blockers: [],
   };
@@ -235,7 +242,7 @@ describe("planTabs", () => {
       sub(107, "open", 0, ["wayfinder:grilling"]),
       sub(105, "open", 1),
     ]);
-    const plan = planTabs([shell], map);
+    const plan = planTabs([shell], map, { nowMs: NOW });
     expect(plan.creates.map((c) => c.ticket)).toEqual([103, 107]); // 105 is blocked → not frontier
     expect(plan.creates[0].title).toBe("[🔎🤖]103"); // labelled ready-for-agent
     expect(plan.creates[1].title).toBe("[🗣️🫵]107"); // no readiness label → HITL
@@ -250,6 +257,7 @@ describe("planTabs", () => {
     const plan = planTabs(
       [shell, { id: "t1", title: "[🔨🫵]103" }, { id: "t2", title: "[🗣️🫵]107" }],
       map,
+      { nowMs: NOW },
     );
     expect(plan.creates).toEqual([]);
     expect(plan.renames).toEqual([]);
@@ -257,7 +265,7 @@ describe("planTabs", () => {
 
   test("upgrades a legacy bare-number tab to [XY]<n> in place", () => {
     const map = mapOf(101, [sub(103, "open", 0, ["wayfinder:prototype", "ready-for-agent"])]);
-    const plan = planTabs([shell, { id: "t1", title: "103" }], map);
+    const plan = planTabs([shell, { id: "t1", title: "103" }], map, { nowMs: NOW });
     expect(plan.creates).toEqual([]); // upgraded, not recreated
     expect(plan.renames).toEqual([{ id: "t1", from: "103", to: "[🧪🤖]103" }]);
   });
@@ -270,6 +278,7 @@ describe("planTabs", () => {
     const plan = planTabs(
       [shell, { id: "t1", title: "[🔎🤖]103" }, { id: "t2", title: "[🔨🫵]107" }],
       map,
+      { nowMs: NOW },
     );
     expect(plan.creates).toEqual([]);
     expect(plan.renames).toEqual([{ id: "t1", from: "[🔎🤖]103", to: "[🔎✓]103" }]);
@@ -280,6 +289,7 @@ describe("planTabs", () => {
     const plan = planTabs(
       [shell, { id: "t1", title: "[🗣️✓]103" }, { id: "t2", title: "[🔨🫵]107" }],
       map,
+      { nowMs: NOW },
     );
     // reopened + unblocked: flip back to 🫵 (no readiness label), don't re-create
     expect(plan.renames).toEqual([{ id: "t1", from: "[🗣️✓]103", to: "[🗣️🫵]103" }]);
@@ -289,7 +299,7 @@ describe("planTabs", () => {
   test("does not rename-churn when a layer stripped the variation selector", () => {
     // live title is 🗣 (no U+FE0F); desired is 🗣️ — same tab, no rename
     const map = mapOf(101, [sub(103, "open", 0, ["wayfinder:grilling"])]);
-    const plan = planTabs([shell, { id: "t1", title: "[\u{1F5E3}🫵]103" }], map);
+    const plan = planTabs([shell, { id: "t1", title: "[\u{1F5E3}🫵]103" }], map, { nowMs: NOW });
     expect(plan.renames).toEqual([]);
     expect(plan.creates).toEqual([]);
   });
@@ -297,27 +307,27 @@ describe("planTabs", () => {
   test("follows a readiness-label flip (labels are the source of truth)", () => {
     // tab shows 🫵; ticket now carries ready-for-agent → tab flips to 🤖
     const map = mapOf(101, [sub(103, "open", 0, ["wayfinder:research", "ready-for-agent"])]);
-    const plan = planTabs([shell, { id: "t1", title: "[🔎🫵]103" }], map);
+    const plan = planTabs([shell, { id: "t1", title: "[🔎🫵]103" }], map, { nowMs: NOW });
     expect(plan.renames).toEqual([{ id: "t1", from: "[🔎🫵]103", to: "[🔎🤖]103" }]);
   });
 
   test("updates the type emoji when the ticket's label changed", () => {
     // tab was minted as research; ticket re-labelled to grilling — X updates
     const map = mapOf(101, [sub(103, "open", 0, ["wayfinder:grilling", "ready-for-agent"])]);
-    const plan = planTabs([shell, { id: "t1", title: "[🔎🤖]103" }], map);
+    const plan = planTabs([shell, { id: "t1", title: "[🔎🤖]103" }], map, { nowMs: NOW });
     expect(plan.renames).toEqual([{ id: "t1", from: "[🔎🤖]103", to: "[🗣️🤖]103" }]);
   });
 
   test("leaves a done tab alone while its ticket stays closed", () => {
     const map = mapOf(101, [sub(103, "closed")]);
-    const plan = planTabs([shell, { id: "t1", title: "[🔨✓]103" }], map);
+    const plan = planTabs([shell, { id: "t1", title: "[🔨✓]103" }], map, { nowMs: NOW });
     expect(plan.creates).toEqual([]);
     expect(plan.renames).toEqual([]);
   });
 
   test("empty-frontier map yields no creates, no renames", () => {
     const map = mapOf(101, [sub(103, "closed"), sub(104, "closed")]);
-    const plan = planTabs([shell], map);
+    const plan = planTabs([shell], map, { nowMs: NOW });
     expect(plan.creates).toEqual([]);
     expect(plan.renames).toEqual([]);
     expect(plan.desiredOrder).toEqual([]);
@@ -325,7 +335,7 @@ describe("planTabs", () => {
 
   test("desiredOrder merges existing + created tabs, ascending by ticket", () => {
     const map = mapOf(101, [sub(103, "open"), sub(107, "open"), sub(121, "open")]);
-    const plan = planTabs([shell, { id: "t2", title: "[🔨🫵]107" }], map);
+    const plan = planTabs([shell, { id: "t2", title: "[🔨🫵]107" }], map, { nowMs: NOW });
     expect(plan.creates.map((c) => c.ticket)).toEqual([103, 121]);
     expect(plan.desiredOrder).toEqual([103, 107, 121]);
   });
@@ -335,13 +345,14 @@ describe("planTabs", () => {
     const plan = planTabs(
       [shell, { id: "t1", title: "[🔨✓]103" }, { id: "t2", title: "[🔨🫵]107" }],
       map,
+      { nowMs: NOW },
     );
     expect(plan.closes).toEqual([]);
   });
 
   test("leaves a stale tab (ticket gone from the map) alone on the additive path", () => {
     const map = mapOf(101, [sub(107, "open")]); // 103 vanished
-    const plan = planTabs([shell, { id: "t1", title: "[🔨🫵]103" }, { id: "t2", title: "[🔨🫵]107" }], map);
+    const plan = planTabs([shell, { id: "t1", title: "[🔨🫵]103" }, { id: "t2", title: "[🔨🫵]107" }], map, { nowMs: NOW });
     expect(plan.renames).toEqual([]);
     expect(plan.closes).toEqual([]);
   });
@@ -353,13 +364,13 @@ describe("planTabs", () => {
     const childMap = sub(29, "open", 0, [MAP_LABEL]);
     expect(childMap.unblocked).toBe(true); // still unblocked — the frontier is what changed
     const map = mapOf(1, [childMap, sub(11, "open", 0, ["wayfinder:grilling"])]);
-    const plan = planTabs([shell], map);
+    const plan = planTabs([shell], map, { nowMs: NOW });
     expect(plan.creates.map((c) => c.ticket)).toEqual([11]);
   });
 
   test("reports a leftover child-map tab as a stray and leaves it open", () => {
     const map = mapOf(1, [sub(29, "open", 0, [MAP_LABEL])]);
-    const plan = planTabs([shell, { id: "t1", title: "[🔨🫵]29" }], map);
+    const plan = planTabs([shell, { id: "t1", title: "[🔨🫵]29" }], map, { nowMs: NOW });
     expect(plan.strays).toEqual([
       { id: "t1", title: "[🔨🫵]29", ticket: 29, reason: "child-map" },
     ]);
@@ -370,9 +381,69 @@ describe("planTabs", () => {
   });
 });
 
+describe("planTabs settle gate", () => {
+  const shell: Tab = { id: "s0", title: "zsh" };
+  /** A ticket created `sec` seconds before NOW. */
+  const aged = (n: number, sec: number, labels: string[] = []) =>
+    sub(n, "open", 0, labels, NOW - sec * 1000);
+
+  test("holds back every ticket of a map read mid-charting", () => {
+    // The bug: a wayfinder map is charted in a burst — tickets created, linked
+    // to the map, THEN wired with blocked_by edges. A read that lands in the
+    // gap between the link and the wiring sees the whole map unblocked, and
+    // sync booted an agent on each of nine tickets, four of which were never
+    // takeable. Every ticket here is 23s old — the gap measured live.
+    const map = mapOf(339, [340, 341, 342, 343, 344, 345, 346, 347, 348].map((n) => aged(n, 23)));
+    expect(map.frontier).toHaveLength(9); // the frontier really does read as nine
+    // Once every ticket has settled, this is the nine agents the bug launched
+    // — four of them on tickets that were blocked seconds later.
+    expect(planTabs([shell], map, { nowMs: NOW + TICKET_SETTLE_MS }).creates).toHaveLength(9);
+
+    const plan = planTabs([shell], map, { nowMs: NOW });
+    expect(plan.creates).toEqual([]); // ...and not one agent is launched
+    expect(plan.settling.map((s) => s.ticket)).toEqual([340, 341, 342, 343, 344, 345, 346, 347, 348]);
+    expect(plan.settling[0].takeableAtMs).toBe(NOW - 23_000 + TICKET_SETTLE_MS);
+    expect(plan.desiredOrder).toEqual([]); // no tab, so nothing to order
+  });
+
+  test("a settled ticket is taken at once — the gate measures age, not last edit", () => {
+    // The workflow the gate must not slow down: an old ticket becomes takeable
+    // the moment its blocker closes. Its age is what counts, so it waits for
+    // nothing — even though GitHub touched it a second ago.
+    const map = mapOf(101, [aged(103, 3600), aged(107, 20)]);
+    const plan = planTabs([shell], map, { nowMs: NOW });
+    expect(plan.creates.map((c) => c.ticket)).toEqual([103]);
+    expect(plan.settling.map((s) => s.ticket)).toEqual([107]);
+  });
+
+  test("takes a ticket the moment the window expires", () => {
+    const map = mapOf(101, [sub(103, "open", 0, [], NOW - TICKET_SETTLE_MS)]);
+    expect(planTabs([shell], map, { nowMs: NOW }).creates.map((c) => c.ticket)).toEqual([103]);
+    // One millisecond younger and it waits.
+    const younger = mapOf(101, [sub(103, "open", 0, [], NOW - TICKET_SETTLE_MS + 1)]);
+    expect(planTabs([shell], younger, { nowMs: NOW }).creates).toEqual([]);
+  });
+
+  test("gates only creates — a young ticket's existing tab still renames", () => {
+    // Renaming is safe whatever the map is doing, and blocking it would leave a
+    // stale ✓ on a reopened ticket for two minutes.
+    const map = mapOf(101, [aged(103, 5, ["wayfinder:grilling"])]);
+    const plan = planTabs([shell, { id: "t1", title: "[🗣️✓]103" }], map, { nowMs: NOW });
+    expect(plan.renames).toEqual([{ id: "t1", from: "[🗣️✓]103", to: "[🗣️🫵]103" }]);
+    expect(plan.settling).toEqual([]); // it already has a tab — nothing to hold back
+  });
+
+  test("a ticket with no creation time reads as settled, never stuck", () => {
+    // createdAtMs is 0 when GitHub sent no parseable time — fail open, so a
+    // field this reader cannot see can never freeze the frontier.
+    const plan = planTabs([shell], mapOf(101, [sub(103, "open")]), { nowMs: NOW });
+    expect(plan.creates.map((c) => c.ticket)).toEqual([103]);
+  });
+});
+
 describe("planTabs --prune", () => {
   const shell: Tab = { id: "s0", title: "zsh" };
-  const prune = { prune: true };
+  const prune = { prune: true, nowMs: NOW };
 
   test("closes a closed ticket's tab instead of ✓-renaming it", () => {
     const map = mapOf(101, [sub(103, "closed"), sub(107, "open")]);
