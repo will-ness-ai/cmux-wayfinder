@@ -13,3 +13,5 @@ Ubiquitous language for cmux-wayfinder. Terms used in code, issues, and docs.
 - **In progress** (lane) — ticket is open, unblocked, and claimed (any assignee). A child map lands here too once open and unblocked: no assignee claims it, but its own workspace is where it runs.
 - **Resolved** (lane) — ticket is closed.
 - **Lane** — one of the four rows above. The four predicates partition a map's sub-issues: every ticket and child map is in exactly one lane.
+- **Charting** — creating a map's tickets. It runs as a burst: the tickets are created, then linked to the map, then wired with their `blocked_by` edges, over about a minute. Between the linking and the wiring every ticket reads as unblocked, so the frontier momentarily reads as the whole map.
+- **Settling** — a ticket younger than the settle window (2 minutes from creation) is *settling*: it may be mid-charting, so sync shows it in its lane but opens no tab for it. Age is measured from creation, so a ticket that reaches the frontier later — when its blocker closes — is long settled and gets its tab at once. Only tab creation waits; renames never do.

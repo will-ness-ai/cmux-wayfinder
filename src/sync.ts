@@ -8,6 +8,11 @@
  *     for a whole map once all its sub-issues are done, plus two enforced
  *     browser tabs — the map issue and the generated lanes board (#8).
  *
+ * A ticket must clear the settle window before it gets a tab, so a map read
+ * mid-charting cannot boot an agent on every ticket at once — see
+ * `TICKET_SETTLE_MS`. Passes report what is settling and, in watch mode, wake
+ * when it comes due.
+ *
  * Default path is additive + rename-only: never closes a workspace/tab, never
  * moves focus, never deletes a file. `--prune` additionally closes done/stale
  * ticket tabs and the workspaces of closed/untracked maps (plus stray group
@@ -27,7 +32,13 @@ import { dirname, join } from "node:path";
 import { sh } from "./proc.ts";
 import { loadTracked, type TrackedRepo } from "./config.ts";
 import { probeNewestUpdate, readFrontierFor, resolveRepo, takeGhCallCount } from "./frontier.ts";
-import { needsFullFetch, pacedDelaySec, type RepoPulse } from "./pace.ts";
+import {
+  needsFullFetch,
+  pacedDelaySec,
+  settleAwareDelaySec,
+  type PacedDelay,
+  type RepoPulse,
+} from "./pace.ts";
 import { blockedByEdges, type WayfinderMap } from "./issues.ts";
 import * as cmux from "./cmux.ts";
 import { formatGeneratedAt, renderBoard } from "./board.ts";
@@ -106,11 +117,23 @@ interface RepoSyncState {
 }
 
 /**
+ * The earlier of two moments, either of which may be absent — how a settle
+ * deadline is folded up from tickets to map to repo to pass.
+ */
+function earliest(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+
+/**
  * Sync one tracked repo. In watch mode (`state` non-null) a one-call probe —
  * the repo's newest `updated_at` — decides whether to re-read maps from
  * GitHub or reuse the previous pass's; the cmux reconcile is local and free,
  * so it runs either way and a closed tab still heals at watch cadence. A
  * single run (`state` null) always reads.
+ *
+ * Returns when this repo's earliest settling ticket becomes takeable, or null.
  */
 async function syncRepo(
   tracked: TrackedRepo,
@@ -118,7 +141,7 @@ async function syncRepo(
   log: Logger,
   desired: Set<string>,
   state: Map<string, RepoSyncState> | null,
-): Promise<void> {
+): Promise<number | null> {
   const prev = state?.get(tracked.repo);
   const canonical = prev?.canonical ?? (await resolveRepo(tracked.repo));
 
@@ -133,7 +156,7 @@ async function syncRepo(
         canonical,
         // The probe ran *before* the read, so an edit landing between the two
         // shows up as a probe change next pass — an extra read, never a miss.
-        pulse: { newestUpdate: probed, lastFullFetchMs: now },
+        pulse: { newestUpdate: probed, lastFullFetchMs: now, pendingSettling: false },
         maps,
       });
     } else {
@@ -150,7 +173,7 @@ async function syncRepo(
   log.info(
     `\n${canonical}${canonical !== tracked.repo ? ` (was ${tracked.repo})` : ""} — ${maps.length} open map(s)${freshness}`,
   );
-  if (maps.length === 0) return;
+  if (maps.length === 0) return null;
 
   const before = await cmux.snapshot();
   const preexistingIds = new Set(before.workspaces.map((w) => w.id));
@@ -164,11 +187,22 @@ async function syncRepo(
   }
 
   // 2. One workspace per open map, each reconciled to its frontier tabs.
+  let takeableAtMs: number | null = null;
   for (const map of maps) {
-    await syncMap({ canonical, cwd: tracked.path, map, group, opts, log });
+    takeableAtMs = earliest(
+      takeableAtMs,
+      await syncMap({ canonical, cwd: tracked.path, map, group, opts, log }),
+    );
   }
+
+  // Remember whether anything is still settling here: while it is, the next
+  // pass must re-read this repo rather than decide on the cached maps.
+  const entry = state?.get(tracked.repo);
+  if (entry) entry.pulse = { ...entry.pulse, pendingSettling: takeableAtMs !== null };
+  return takeableAtMs;
 }
 
+/** Returns when this map's earliest settling ticket becomes takeable, or null. */
 async function syncMap(ctx: {
   canonical: string;
   cwd: string;
@@ -176,7 +210,7 @@ async function syncMap(ctx: {
   group: cmux.Group | undefined;
   opts: Options;
   log: Logger;
-}) {
+}): Promise<number | null> {
   const { canonical, cwd, map, group, opts, log } = ctx;
   const done = isMapComplete(map);
   const title = workspaceTitle(map.title, map.number, done);
@@ -200,13 +234,18 @@ async function syncMap(ctx: {
   // recreated if the user closed it.
   await ensureBrowserTab({ ws, title: mapTabTitle(map.number), url: map.url, index: 0, opts, log });
 
-  await reconcileTabs({ ws, map, title, opts, log });
+  const takeableAtMs = await reconcileTabs({ ws, map, title, opts, log });
 
   // The lanes board goes last: it renders the state the pass just reconciled.
   await syncBoard({ canonical, map, ws, opts, log });
+  return takeableAtMs;
 }
 
-/** Reconcile a workspace's managed ticket tabs against the map's frontier. */
+/**
+ * Reconcile a workspace's managed ticket tabs against the map's frontier.
+ * Returns when the earliest settling ticket becomes takeable (ms epoch), or
+ * null when nothing is settling.
+ */
 async function reconcileTabs(ctx: {
   ws: cmux.Workspace | undefined;
   map: WayfinderMap;
@@ -214,12 +253,13 @@ async function reconcileTabs(ctx: {
   title: string;
   opts: Options;
   log: Logger;
-}) {
+}): Promise<number | null> {
   const { ws, map, title, opts, log } = ctx;
   // Without a live workspace (dry-run, uncreated) there are no existing tabs,
   // so the plan shows the full frontier as creates.
   const existing: Tab[] = ws ? await cmux.listSurfaces(ws.id) : [];
-  const plan = planTabs(existing, map, { prune: opts.prune });
+  const nowMs = Date.now();
+  const plan = planTabs(existing, map, { prune: opts.prune, nowMs });
 
   // A child-map tab is never created any more, so a stray one is a leftover.
   // Say so every pass: the additive path will not close it (a live session may
@@ -231,9 +271,21 @@ async function reconcileTabs(ctx: {
     );
   }
 
+  // A settling ticket is not a problem, so say what it is and when it lands —
+  // otherwise a frontier with no tab looks like sync missed it.
+  let takeableAtMs: number | null = null;
+  for (const s of plan.settling) {
+    takeableAtMs = earliest(takeableAtMs, s.takeableAtMs);
+    const inSec = Math.max(0, Math.ceil((s.takeableAtMs - nowMs) / 1000));
+    log.info(
+      `  ⏳ workspace "${title}": ticket #${s.ticket} is still settling — ` +
+        `takeable in ${inSec}s (the map may still be charting)`,
+    );
+  }
+
   if (plan.creates.length === 0 && plan.renames.length === 0 && plan.closes.length === 0) {
     log.info(`  workspace "${title}": up to date (frontier ${fmtFrontier(map)})`);
-    return;
+    return takeableAtMs;
   }
   log.info(`  workspace "${title}": frontier ${fmtFrontier(map)}`);
 
@@ -278,6 +330,7 @@ async function reconcileTabs(ctx: {
 
   // Order managed tabs by ticket, after any non-managed (default shell) tabs.
   if (!opts.dryRun && ws) await orderTabs(ws.id, plan.desiredOrder);
+  return takeableAtMs;
 }
 
 /**
@@ -471,19 +524,24 @@ async function listCacheEntries(root: string): Promise<string[]> {
  * One full sync pass. Reloads tracked.yaml each time so watch mode picks up
  * config edits between ticks. `state` (watch mode only) carries the probe
  * baselines and cached reads between passes; null = always read GitHub.
+ *
+ * Returns when the pass's earliest settling ticket becomes takeable (ms epoch),
+ * or null when nothing is settling — what `watch` sleeps towards.
  */
 async function runSync(
   opts: Options,
   log: Logger,
   state: Map<string, RepoSyncState> | null = null,
-): Promise<void> {
+): Promise<number | null> {
   const tracked = await loadTracked(opts.configPath);
   const desired = new Set<string>();
+  let takeableAtMs: number | null = null;
   for (const repo of tracked) {
-    await syncRepo(repo, opts, log, desired, state);
+    takeableAtMs = earliest(takeableAtMs, await syncRepo(repo, opts, log, desired, state));
   }
   if (opts.prune) await prune(desired, opts, log);
   console.log(opts.dryRun ? "\n(dry run — no changes made)" : "\nsync complete");
+  return takeableAtMs;
 }
 
 /**
@@ -535,23 +593,36 @@ async function watch(opts: Options, log: Logger) {
     log.info(`\n── sync @ ${new Date().toLocaleTimeString()} ──`);
     let delaySec = opts.watchSec!;
     try {
-      await runSync(opts, log, state);
+      const takeableAtMs = await runSync(opts, log, state);
       const passCalls = takeGhCallCount();
       const budget = await ghCoreBudget();
+      // No budget reading (offline, gh missing) → the configured interval, and
+      // treated as un-throttled so a settling ticket can still pull it in.
+      const paced: PacedDelay = budget
+        ? pacedDelaySec({
+            passCalls,
+            remaining: budget.remaining,
+            resetInSec: budget.resetInSec,
+            baseSec: opts.watchSec!,
+            headroom: GOVERNOR_HEADROOM,
+          })
+        : { sec: opts.watchSec!, throttled: false };
       if (budget) {
-        delaySec = pacedDelaySec({
-          passCalls,
-          remaining: budget.remaining,
-          resetInSec: budget.resetInSec,
-          baseSec: opts.watchSec!,
-          headroom: GOVERNOR_HEADROOM,
-        });
         log.info(
           `gh budget: pass used ${passCalls} call(s); ${budget.remaining} remaining, window resets in ${Math.ceil(budget.resetInSec / 60)} min`,
         );
-        if (delaySec > opts.watchSec!) {
-          log.info(`⚠ pacing: next sync in ${delaySec}s to stay inside the rate budget`);
+        if (paced.throttled) {
+          log.info(`⚠ pacing: next sync in ${paced.sec}s to stay inside the rate budget`);
         }
+      }
+      // Wake for a settling ticket rather than a tick after it — but never
+      // ahead of a throttled sleep, which protects the rate budget.
+      delaySec = settleAwareDelaySec({
+        paced,
+        msToTakeable: takeableAtMs === null ? null : takeableAtMs - Date.now(),
+      });
+      if (delaySec < paced.sec) {
+        log.info(`next sync in ${delaySec}s — a settling ticket becomes takeable`);
       }
     } catch (e) {
       console.error(`sync failed: ${e instanceof Error ? e.message : e}`);

@@ -29,6 +29,8 @@ export interface RawSubIssue {
   labels?: Array<{ name?: string } | null>;
   /** GitHub sends `null` for an issue opened with no description. */
   body?: string | null;
+  /** ISO-8601 creation time — the clock the tab settle gate reads. */
+  created_at?: string;
   html_url: string;
 }
 
@@ -71,6 +73,16 @@ export interface SubIssue {
    * the `sub_issues` listing already, so carrying it costs no extra call.
    */
   body: string;
+  /**
+   * When the ticket was opened, in ms since the epoch — the age the tab settle
+   * gate measures (see `planTabs`). 0 when GitHub sent no parseable time, which
+   * reads as infinitely old, so a missing field never holds a ticket back.
+   *
+   * Creation time, not last-modified time: a ticket only risks being read
+   * mid-charting in the first minute of its life, while a ticket that becomes
+   * takeable later (its blocker closed) is old by then and must not wait.
+   */
+  createdAtMs: number;
   url: string;
   /**
    * Blocker issue numbers, open *and* closed, repo-wide. {@link blockedBy} is
@@ -111,6 +123,8 @@ export function toSubIssue(raw: RawSubIssue, blockers: number[]): SubIssue {
     assignees: (raw.assignees ?? []).map((a) => a.login),
     labels,
     body: raw.body ?? "",
+    // An absent or unparseable time reads as 0 — see SubIssue.createdAtMs.
+    createdAtMs: Date.parse(raw.created_at ?? "") || 0,
     url: raw.html_url,
     blockers,
   };

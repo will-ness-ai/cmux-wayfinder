@@ -17,6 +17,7 @@ function raw(number: number, over: Partial<RawSubIssue> = {}): RawSubIssue {
     assignees: [],
     labels: [],
     body: "",
+    created_at: "2026-08-09T05:24:42Z",
     html_url: `https://github.com/acme/example/issues/${number}`,
     ...over,
   };
@@ -44,9 +45,21 @@ describe("toSubIssue", () => {
       assignees: ["ann"],
       labels: ["wayfinder:task", "ready-for-agent"],
       body: "## What to build\n\nthe thing",
+      createdAtMs: Date.parse("2026-08-09T05:24:42Z"),
       url: "https://github.com/acme/example/issues/7",
       blockers: [3, 5],
     });
+  });
+
+  test("createdAtMs reads the creation time; anything unparseable reads as 0", () => {
+    // 0 is "infinitely old", so the tab settle gate lets such a ticket through
+    // rather than holding it back forever.
+    expect(toSubIssue(raw(1, { created_at: "2026-08-09T05:24:42Z" }), []).createdAtMs).toBe(
+      Date.parse("2026-08-09T05:24:42Z"),
+    );
+    const { created_at, ...noCreatedAt } = raw(1);
+    expect(toSubIssue(noCreatedAt, []).createdAtMs).toBe(0);
+    expect(toSubIssue(raw(1, { created_at: "not a date" }), []).createdAtMs).toBe(0);
   });
 
   test("a body-less element reads as an empty body", () => {
