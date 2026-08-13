@@ -15,10 +15,11 @@ Version sensitivity is high. Claude Code ships almost daily, and this note is a 
 
 ## Headline
 
-Five findings change the shape of Discord mode. The rest of this note supports them.
+Six findings change the shape of Discord mode. The rest of this note supports them.
 
-1. **One process can take many turns.** `--input-format stream-json` keeps a single `claude` process alive across user messages, in one session, with context intact. The map assumed one `claude -p --resume` per message. That is no longer the only option. (§2)
-2. **A running session has an inbox.** Every `claude` process — TUI included — opens a Unix socket that accepts a user message. This is INTERNAL, not documented. The map's fact "there is no supported way to send a message into a running TUI session" is correct on the word *supported*, and wrong on the word *no*. (§2.3)
+0. **Channels are the supported way to push a message into a live session** — an MCP server that injects external events into a running session, with an official **Discord** plugin that already does threads, attachments and message editing. It is a research preview. This is the headline, and it displaces findings 1 and 2 as the first thing to evaluate. (§2.4)
+1. **One process can take many turns.** `--input-format stream-json` keeps a single `claude` process alive across user messages, in one session, with context intact. The map assumed one `claude -p --resume` per message. That is no longer the only option. (§2.2)
+2. **A running session has an inbox.** Every `claude` process — TUI included — opens a Unix socket that accepts a user message. This is INTERNAL, not documented, and channels supersede it. (§2.3)
 3. **Hooks are a full side channel, and one of them can wait.** Hooks fire in both TUI and headless. A `PreToolUse` hook blocks the agent while it runs, for up to 10 minutes, and can allow or deny the tool. This is a working mechanism for "ask Discord for permission". Hooks also support an `http` type, so the bot can receive a POST instead of running a script. (§4)
 4. **A headless turn accepts an image.** A base64 image block over `--input-format stream-json` works. A phone photo can reach the agent. (§6)
 5. **The transcript format is explicitly unstable.** The docs tell you not to parse `.jsonl` files. The Agent SDK exposes `listSessions()` and `getSessionMessages()` for the same job. (§7)
@@ -48,6 +49,8 @@ All are OBSERVED in `claude --help` on 2.1.229.
 | `--max-budget-usd <amount>` | Caps spend. Ends with `error_max_budget_usd`. |
 | `--no-session-persistence` | Print mode only. Writes no transcript. |
 | `--bare` | Skips discovery of hooks, skills, plugins, MCP and CLAUDE.md. |
+| `--channels <servers...>` | Loads channel plugins (§2.4). **Hidden from `--help`** during the preview. |
+| `--dangerously-load-development-channels <servers...>` | Loads a channel that is not on the allowlist. Local development only. Hidden too. |
 
 **DOCUMENTED** conflicts: `--print` refuses `--bg`, and refuses `--cloud <description>`.
 
@@ -83,9 +86,9 @@ This matters for ticket **Where a session runs and what remembers it**: a sessio
 
 **DOCUMENTED**: SIGTERM on a `-p` run aborts the turn, kills the process tree of any running Bash command, runs `SessionEnd` hooks, and exits **143**. Transcripts are written continuously, so the session stays resumable.
 
-## 2. Feeding a session — three channels
+## 2. Feeding a session — four routes
 
-This is the core of the ticket. Three ways exist to put a human message into a session.
+This is the core of the ticket. Four ways exist to put a human message into a session. Read §2.4 first: it is the supported one, and it was missed at charting.
 
 ### 2.1 One process per message — `-p --resume`
 
@@ -139,9 +142,77 @@ Binary strings tagged `[uds-messaging]` show the protocol: newline-delimited JSO
 
 **Not tested**: no message was injected into a live session, because that would interrupt a real session belonging to the user.
 
-**Weigh this carefully.** It is undocumented and unsupported. It can vanish in any release. It is recorded here because it is the only channel that reaches a session a human is *watching in the TUI* — which is precisely the checkout case in ticket **Checkout and handback**.
+**Weigh this carefully.** It is undocumented and unsupported. It can vanish in any release. **Prefer §2.4**, which reaches the same live TUI session on a supported contract.
 
-### 2.4 Interrupting a turn
+### 2.4 Channels — the supported push into a live session
+
+**DOCUMENTED**: `https://code.claude.com/docs/en/channels` and `channels-reference`.
+
+A **channel** is an MCP server that Claude Code spawns over stdio, which declares `capabilities.experimental["claude/channel"]` and then emits `notifications/claude/channel`. Claude Code injects each event into the running session as a tagged block:
+
+```
+<channel source="discord" attr="value">the message body</channel>
+```
+
+The `source` attribute is set from the registered channel name.
+
+**OBSERVED** in the 2.1.229 binary: `--channels <servers...>`, `--dangerously-load-development-channels <servers...>`, `channelsEnabled`, `allowedChannelPlugins`, `claude/channel` and `claude/channel/permission` are all present.
+
+**OBSERVED**: neither `--channels` nor `--dangerously-load-development-channels` appears in `claude --help` on 2.1.229. The flags work; they are hidden during the preview. Do not conclude from `--help` that the feature is absent.
+
+#### Delivery
+
+**DOCUMENTED**, and this is the constraint that shapes the design:
+
+- Events **queue; they do not interrupt the current turn.** Several events arriving during one long turn are delivered together on the **next** turn.
+- Claude Code never acknowledges a notification. The MCP call resolves when the event is written to the transport, not when Claude reads it.
+- If the session did not load the server as a channel, or org policy blocks it, events are **silently dropped**.
+- For independent event streams that must run concurrently, the docs say run **separate sessions** — which matches one session per ticket.
+
+#### Replying outward
+
+**DOCUMENTED**: there is no built-in reply tool. The channel server declares an ordinary MCP tool (the plugins call it `reply`), and the server's `instructions` field tells Claude when to use it. The terminal shows the inbound message and a short confirmation of the reply, not the reply text.
+
+#### Permission relay
+
+**DOCUMENTED**: a channel opts in with `capabilities.experimental["claude/channel/permission"]`. Then:
+
+1. Claude Code emits `notifications/claude/channel/permission_request` with `request_id`, `tool_name`, `description` and `input_preview`. The `request_id` is five letters from `a-z` without `l`.
+2. The server relays the prompt to the remote human.
+3. The human replies `yes <id>` or `no <id>`.
+4. The server emits `notifications/claude/channel/permission` with `behavior: "allow" | "deny"`.
+
+**The local terminal dialog stays open in parallel. Whichever answer arrives first wins; the other is dropped.** There is no fixed ten-minute ceiling as with a blocking hook (§4.2).
+
+**Security note, DOCUMENTED**: anyone who can reply through the channel can approve tool use. The allowlist is the whole defence.
+
+#### Sender gating
+
+**DOCUMENTED**: the server holds a sender allowlist and drops non-members **silently**, before notifying. Gate on the **sender's identity, not the room** — in a group channel, gating on the room lets any member inject. The plugins pair by DM: the human DMs the bot, the bot returns a code, the human approves the code in the Claude Code session.
+
+#### The official Discord plugin
+
+**DOCUMENTED**, and it is close to what this map wants:
+
+- DMs by default, with **guild channels and threads opt-in** through its `access.json`.
+- **File attachments** — up to 10 files, 25 MB each. Long replies auto-chunk.
+- **`edit_message`** for editing a message in place.
+- **`reply_to`** for threading.
+- Inbound files are not auto-downloaded; the agent calls `download_attachment()`.
+
+Telegram, iMessage and a `fakechat` development demo ship alongside it.
+
+#### Maturity
+
+**DOCUMENTED**: research preview. The flag syntax and the protocol contract may change. `--channels` accepts only plugins on an Anthropic-maintained allowlist, or an org's `allowedChannelPlugins`; anything else needs `--dangerously-load-development-channels`, which the binary's own text limits to local development. Org policy `channelsEnabled` must be true on Team/Enterprise. Not available on Bedrock, Google Cloud or Microsoft Foundry, and Anthropic authentication is required.
+
+#### What it means here
+
+Channels reach a **live** session, so the shape the map wanted — a real Claude session in a cmux tab, fed from Discord, watchable with `ctrl+o` — is available on a supported contract, with a reference implementation to copy. The cost is the preview status, the allowlist gate, and next-turn delivery rather than immediate.
+
+The three routes above stay relevant: they run a session with **no** live process attached, which is what a phone-only conversation with nobody at the terminal actually is.
+
+### 2.5 Interrupting a turn
 
 **DOCUMENTED**: the Agent SDK exposes `interrupt()` on the query object, and it needs streaming-input mode. **OBSERVED**: `system/init` advertises `capabilities: ["interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"]`, so the protocol is feature-detectable. **INFERRED**: the plain CLI has no documented interrupt other than a signal.
 
@@ -350,26 +421,31 @@ The map records five facts from a first capability pass. Verifying them:
 | Resume by UUID works; transcripts at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` | **Confirmed.** Cross-directory since v2.1.223, same machine only. |
 | Interactive and headless are interchangeable; the mode is not stored | **Confirmed.** |
 | `--output-format stream-json` is headless-only | **Confirmed.** |
-| There is no supported way to send a message into a running TUI session | **Confirmed as written, but incomplete.** An INTERNAL Unix socket inbox exists on every running session, TUI included (§2.3). |
+| There is no supported way to send a message into a running TUI session | **Wrong.** **Channels** are a documented, supported push into a live session, with an official Discord plugin (§2.4). An INTERNAL socket inbox also exists (§2.3). |
 | Headless denies any tool that is not pre-approved and shows no prompt | **Confirmed as the default, but not the whole picture.** A `PreToolUse` hook decides tool calls dynamically and blocks the agent up to 10 minutes while it decides (§4.2). |
 
-And one charted assumption is now wrong:
+And one charted assumption is now wrong, twice over:
 
 > "The bot drives headless: one `claude -p --resume` per message."
 
-One process can take **many** messages (§2.2). Whether the bot should hold a live process per conversation or keep spawning per message is now a real decision, not a given. It belongs to ticket **CLI surface and process model — what cmux-sync becomes**.
+- One process can take **many** messages (§2.2).
+- The bot need not drive headless at all. A channel feeds a **live** session (§2.4).
+
+So the driver model is a real decision with four candidate routes, not a given. It belongs to ticket **CLI surface and process model — what cmux-sync becomes**.
+
+The rest of the map's charted shape survives. Structure, scope and ownership are untouched by this note.
 
 ## 10. What this settles, per ticket
 
 | Ticket | What this note gives it |
 | --- | --- |
-| **CLI surface and process model** | Three feeding channels with their trade-offs (§2). The one-process-per-message assumption is no longer forced. |
+| **CLI surface and process model** | Four feeding routes with their trade-offs (§2). The one-process-per-message assumption is no longer forced, and channels remove the need to drive headless at all. |
 | **Where a session runs and what remembers it** | Cross-directory resume survives a removed worktree (§1.4). Do not parse transcripts; use the SDK (§7.2). 30-day retention kills old conversations (§7.3). |
-| **Permissions in headless** | `PreToolUse` hook decides and blocks up to 10 min (§4.2). `permission_denials` on every result explains a stop (§3.2). Wire `PreToolUse`, not `PermissionRequest` (§5). |
-| **Turn-taking with several humans** | One driver at a time is a correctness requirement, not a preference (§8). |
-| **Attachments and images** | Base64 image block over stream-json stdin, verified working (§6). |
-| **Prototype: a Claude turn in a thread** | The full event vocabulary to render, and `parent_tool_use_id` for folding subagents (§3). |
-| **Checkout and handback** | The messaging socket is the only channel into a watched TUI session (§2.3). cmux's own hooks are already attached and must compose with the bot's (§4.4). |
+| **Permissions in headless** | Two mechanisms: the channel permission relay, answered `yes <id>` / `no <id>` with the terminal dialog live in parallel (§2.4), and a `PreToolUse` hook that decides and blocks up to 10 min (§4.2). `permission_denials` on every result explains a stop (§3.2). Wire `PreToolUse`, not `PermissionRequest` (§5). |
+| **Turn-taking with several humans** | One driver at a time is a correctness requirement, not a preference (§8). Channel sender gating must key on the **sender**, not the room (§2.4). |
+| **Attachments and images** | Base64 image block over stream-json stdin, verified working (§6). The Discord channel plugin already carries attachments both ways (§2.4). |
+| **Prototype: a Claude turn in a thread** | The full event vocabulary to render, and `parent_tool_use_id` for folding subagents (§3). Under channels the rendering problem changes shape — the plugin auto-chunks and can `edit_message` (§2.4). |
+| **Checkout and handback** | Channels reach a session a human is watching, so checkout may stop being a handover at all (§2.4). cmux's own hooks are already attached and must compose with the bot's (§4.4). |
 | Fog: **Notification and ping policy** | The four `Notification` matchers and their timings (§4.5). |
 | Fog: **Cost and rate control** | `rate_limit_event` on the stream, and `total_cost_usd` per result (§3). |
 
@@ -381,3 +457,4 @@ Carry these into the build as risks.
 - Injecting a message into a live session over the messaging socket (§2.3). Existence is observed; the write path is not.
 - Whether an `http` hook behaves under a bot that restarts while a hook is in flight.
 - Long-run behaviour of a held-open stream-json process over hours of Discord idling.
+- **Every channels claim in §2.4 is DOCUMENTED, not run.** No channel was enabled on this machine. Before the design leans on channels, stand up the official Discord plugin and confirm: that this account is inside the preview rollout, that guild channels and threads work as the docs claim, and how next-turn delivery feels when a human sends three messages in a row.
