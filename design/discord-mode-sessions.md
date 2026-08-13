@@ -124,7 +124,11 @@ interface TicketRow {
   /** Absolute directory of the last turn. */
   cwd: string | null;
   last_turn_at: string | null;
-  /** Newest message in the thread the bot has answered. */
+  /**
+   * Newest message in the thread the bot has answered.
+   * AMENDED by ticket #26: renamed `last_consumed_message_id`, and `lease` and
+   * `muted` change with it. See design/discord-mode-turn-taking.md.
+   */
   last_answered_message_id: string | null;
   driver: { kind: "bot" }
         | { kind: "checkout"; user: string; since: string };
@@ -242,7 +246,9 @@ Discord.
   conversation, and a new session with it.
 - **Turn-taking ([#26](https://github.com/will-ness-ai/cmux-wayfinder/issues/26)):**
   the first prompt of a session must also work as the prompt that primes a
-  session that lost its transcript.
+  session that lost its transcript. **Settled** in
+  [`design/discord-mode-turn-taking.md`](./discord-mode-turn-taking.md), which
+  also amends the store schema above.
 - **`CONTEXT.md`, at map close:** add **session store**, **turn lease**, and
   **session id** (derived from the thread id).
 
