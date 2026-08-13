@@ -11,6 +11,22 @@ The question: how does a bot own a Discord server completely, and how does it ca
 
 ---
 
+## Read this against the channels correction
+
+This research was done on the assumption that the bot speaks to Discord's HTTP and gateway API itself. The map's correction opens a second path: Claude Code ships **channels**, and Anthropic ships an official Discord channel plugin that already carries attachments both ways, auto-chunks long replies, and exposes `edit_message` and `reply_to`.
+
+The findings hold either way. Their **weight** shifts.
+
+| Sections | Under a hand-built client | If the official plugin carries the conversation |
+| --- | --- | --- |
+| [1](#1-owning-the-guild), [2](#2-channels-and-categories), [3](#3-the-ticket-post-and-its-thread) — owning the guild, the channel tree, the ticket post | build spec | **unchanged — still a build spec.** No chat plugin creates a category per repo, a channel per map, a ticket post per ticket, or archives a closed map. That work is the bot's either way. |
+| [4](#4-carrying-a-turn-into-a-thread), [5](#5-buttons-and-the-interaction-lifecycle), [6](#6-attachments) — carrying a turn, buttons, attachments | build spec | **audit checklist.** Check the plugin against 4.4 (chunking), 4.5 (code fences), 4.6 (tables), 4.7 (`allowed_mentions`) and 6 (CDN expiry, size caps) rather than building them. Where it falls short, these sections say what "correct" looks like. |
+| [7](#7-a-bot-on-a-laptop-that-sleeps) — gateway, sleep, recovery | build spec | applies to **whichever process holds the websocket**. If that is the plugin, these are the questions to put to it. |
+
+**Stand up the plugin and see** — [Task: stand up the official Discord channel plugin and see if channels work here](https://github.com/will-ness-ai/cmux-wayfinder/issues/38) produces the run-and-observed evidence that decides which column applies.
+
+---
+
 ## Headline findings
 
 The twelve facts that change the design. Each links to the section that proves it.
