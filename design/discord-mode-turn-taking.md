@@ -27,7 +27,7 @@ Every measured fact is in those two notes. This document decides.
    takes every message after that mark, in order.
 3. **The thread is the address.** Every human message in a ticket thread is for
    the agent. The agent never decides whether it was addressed. A human silences
-   it with `!mute`.
+   it with the `/mute` slash command.
 4. **Repetition is better than silence.** After a crash the bot delivers a
    message a second time. The agent can see a repeat. Nobody can see a message
    that never arrived.
@@ -114,12 +114,16 @@ conversation read out of order is worse than a conversation read late.
 | a human message, type `DEFAULT` or `REPLY` | yes | yes |
 | a bot message, the agent's own replies included | no | yes |
 | a join, a pin, a thread-start, any other system type | no | yes |
-| a command (`!mute`, `!unmute`) | no | yes |
 | any message while the thread is muted | no | yes |
 | any message while the ticket is checked out | no | yes |
 
 To mark a message consumed without delivering it keeps the mark moving. The
 queue can then never hold something the bot has decided to skip.
+
+**A command is absent from this table, and that is the point.** `/mute` is a
+Discord slash command, so it is an interaction and never a message in the
+thread. It cannot reach the queue, it cannot become an envelope, and a human who
+writes the word "mute" inside a sentence changes nothing.
 
 ## The turn lease
 
@@ -254,22 +258,50 @@ To address a human, write @handle. Everybody in the thread reads your reply.
 for one ticket and the agent is its purpose. No mention is needed, at any point.
 
 The agent never judges whether a message was for it. The best model scores 64%
-on that decision, and humans score 60-66%. So silence is explicit:
+on that decision, and humans score 60-66%. So silence is explicit, and it is one
+slash command.
 
-| Command | Effect |
+### `/mute`
+
+**One Discord slash command, registered per guild, that toggles the mute of the
+thread it runs in.**
+
+```
+/mute [catchup: true|false]
+```
+
+| The thread is | `/mute` does | The bot answers, in the thread |
+| --- | --- | --- |
+| awake | mutes it. `muted` is written with the invoker and the newest message id | **@will muted me in this thread. Run `/mute` again to wake me.** |
+| muted, `catchup` false or absent | wakes it. Nothing from the muted period is delivered | **@will woke me. I did not read the 12 messages while I was muted.** |
+| muted, `catchup: true` | wakes it, and delivers everything since `muted.since_message_id` as one batch, inside the batch limit | **@will woke me and asked me to read the 12 messages I missed.** |
+
+**The answer is visible, never ephemeral.** A mute changes the thread for
+everybody in it, so everybody must see it happen. Discord already shows who ran
+the command.
+
+Two more rules hold the surface together:
+
+| Rule | Reason |
 | --- | --- |
-| `!mute` | The bot stops folding messages into turns. It marks each new message consumed as it arrives, and reacts 🔇 once |
-| `!unmute` | The bot wakes. It delivers nothing from the muted period |
-| `!unmute catchup` | The bot wakes and delivers everything since `muted.since_message_id` as one batch, inside the batch limit |
-| any message that mentions the bot | Wakes it, and is answered. Nobody can be stuck with a bot they cannot wake |
+| Anybody in the thread can run it | The gate is at the door, not per command. It matches who can already steer the agent |
+| A message that mentions the bot wakes it and is answered | Nobody can be stuck with a bot they cannot wake |
+| `/mute` outside a ticket thread answers ephemerally and does nothing | A channel is a ledger. There is no session to silence |
+| `/mute` while a turn runs takes effect at once, and that turn still finishes and replies | To kill a running turn throws away work |
 
-**The bot reads commands, never the agent.** A command is matched at arrival, on
-the whole message text, and it never becomes an envelope. A command takes effect
-at once, even while a turn runs. `!mute` during a turn lets that turn finish and
-reply — to kill it would throw away work — and consumes nothing more.
+**An interaction is not a message.** This is why the command is a slash command
+and not text such as `!mute`. Discord delivers it on a separate path, so it never
+enters the thread history, never reaches the consumed mark, and can never become
+an envelope. The bot answers inside 3 seconds, which a store write always meets.
 
-A checkout mutes the thread, because the human at the cmux TUI holds the wheel.
-Handback delivers a catchup batch. Ticket
+Ticket [#27](https://github.com/will-ness-ai/cmux-wayfinder/issues/27) owns the
+registration of the command, with the rest of the Discord tree the bot owns. A
+guild command is live at once; the bot invite needs the
+`applications.commands` scope.
+
+A checkout mutes the thread by writing the same `muted` field, without the
+command, because the human at the cmux TUI holds the wheel. Handback delivers a
+catchup batch. Ticket
 [#24](https://github.com/will-ness-ai/cmux-wayfinder/issues/24) owns the
 handshake and the exact words.
 
@@ -302,7 +334,7 @@ conversation, and the conversation is the asset.
 | ⏳ on the message | The bot has it. A turn is running, so it waits |
 | 👀 on the message | The message is in the turn that runs now. ⏳ is removed |
 | the typing indicator in the thread | A turn is running. The bot refreshes it every 8 seconds |
-| 🔇 on the message | `!mute` was accepted |
+| the answer to `/mute` | The thread is muted, or awake. Everybody in the thread sees it |
 | the reply | The turn is finished. The bot removes its 👀 from that batch |
 
 A turn that passes **3 minutes** gets one status message. The bot edits that one
@@ -340,13 +372,15 @@ under channels:
   model:** turn-taking does not constrain the choice. One writer holds the store
   and the lease.
 - **[#24](https://github.com/will-ness-ai/cmux-wayfinder/issues/24) checkout:** a
-  checkout is a mute, and a handback is `!unmute catchup`.
+  checkout writes the same `muted` field as `/mute`, and a handback wakes the
+  thread with a catchup batch.
 - **[#25](https://github.com/will-ness-ai/cmux-wayfinder/issues/25)
   permissions:** a permission answer is not a human turn. It must never become
   an envelope, and it must not need the lease.
 - **[#27](https://github.com/will-ness-ai/cmux-wayfinder/issues/27)
   reconciliation:** a post the bot makes again gives a new thread, a new session
-  and a new brief.
+  and a new brief. The bot also owns the `/mute` guild command, and the invite
+  needs the `applications.commands` scope.
 - **[#28](https://github.com/will-ness-ai/cmux-wayfinder/issues/28)
   attachments:** an attachment is a child element of its envelope. #28 sets the
   element.
@@ -382,5 +416,5 @@ Carry these into the build as risks.
 7. **Rate limits.** Reactions, typing and edits are API calls. A very busy thread
    has not been measured against Discord's limits.
 8. **A conversation that only humans need.** Two people who talk to each other
-   must remember `!mute`. If they forget, the agent answers, because rule 3 says
+   must remember `/mute`. If they forget, the agent answers, because rule 3 says
    it must.
