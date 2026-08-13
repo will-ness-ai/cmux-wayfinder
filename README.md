@@ -163,6 +163,21 @@ Known v1 limitations:
 - The map browser tab shows "Page not found" for a **private** repo until the
   cmux webview is logged into GitHub (the tab points at the right URL either way).
 
+## The tracking skill
+
+`skills/cmux-wayfinder-tracking/SKILL.md` is an agent-facing guide to
+`tracked.yaml`: registering a repo, deregistering one without closing a live
+workspace, and the per-repo `discord:` block. Install it globally, so an agent in
+*any* repo can add that repo to the list:
+
+```sh
+ln -s "$PWD/skills/cmux-wayfinder-tracking" ~/.claude/skills/cmux-wayfinder-tracking
+```
+
+A symlink, so the skill an agent loads is the one this repo ships — a change to
+`tracked.yaml`'s schema and its documentation land in one commit. The skill finds
+this checkout through the `bun link` symlink, so run `bun link` too.
+
 ## Planning
 
 Work is tracked as wayfinder issues in this repo: see the issue labeled `wayfinder:map`.
